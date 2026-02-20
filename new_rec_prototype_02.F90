@@ -1335,10 +1335,14 @@ contains
     integer :: d, s, i, j, k
     integer, dimension(n_dim,2*n_dim-1) :: sec_off
     integer, dimension(n_dim+1) :: tmp_idx
-    integer :: n_sec, n_sec2, offset
-    integer, dimension(2*n_dim) :: n_sec_idx,         n_sec_idx2
-    integer, dimension(2*n_dim-1,2*n_dim) :: sec_idx, sec_idx2
-    integer, dimension(4*n_dim**2+1) :: lis
+    integer :: n_sec, offset
+    integer, dimension(2*n_dim)           :: n_sec_idx
+    integer, dimension(2*n_dim-1,2*n_dim) :: sec_idx
+
+    ! integer :: n_sec2
+    ! integer, dimension(2*n_dim)           :: n_sec_idx2
+    ! integer, dimension(2*n_dim-1,2*n_dim) :: sec_idx2
+    ! integer, dimension(4*n_dim**2+1)      :: lis
 
     n_sec     = 0
     n_sec_idx = 0
@@ -1383,39 +1387,39 @@ contains
       end do
     end do
 
-    lis = list
+    ! lis = list
 
-    ! check that you can recover the information
-    n_sec2     = 0
-    n_sec_idx2 = 0
-    sec_idx2   = 0
+    ! ! check that you can recover the information
+    ! n_sec2     = 0
+    ! n_sec_idx2 = 0
+    ! sec_idx2   = 0
 
-    n_sec2 = lis(1)
-    do k = 1,lis(1)
-      n_sec_idx2(k) = lis(1+k)
-      offset = 1+lis(1)+sum(lis(2:k))
-      do j = 1,lis(1+k)
-        sec_idx2(j,k) = lis(offset+j)
-      end do
-    end do
+    ! n_sec2 = lis(1)
+    ! do k = 1,lis(1)
+    !   n_sec_idx2(k) = lis(1+k)
+    !   offset = 1+lis(1)+sum(lis(2:k))
+    !   do j = 1,lis(1+k)
+    !     sec_idx2(j,k) = lis(offset+j)
+    !   end do
+    ! end do
 
-    if ( n_sec2 /= n_sec ) then
-      tmp_idx = 0
-    end if
+    ! if ( n_sec2 /= n_sec ) then
+    !   tmp_idx = 0
+    ! end if
 
-    do k = 1,n_sec
-      if ( n_sec_idx2(k) /= n_sec_idx(k) ) then
-        tmp_idx = 0
-      end if
-      do j = 1,n_sec_idx(k)
-        if ( sec_idx2(j,k) /= sec_idx(j,k) ) then
-          tmp_idx = 0
-        end if
-      end do
-    end do
+    ! do k = 1,n_sec
+    !   if ( n_sec_idx2(k) /= n_sec_idx(k) ) then
+    !     tmp_idx = 0
+    !   end if
+    !   do j = 1,n_sec_idx(k)
+    !     if ( sec_idx2(j,k) /= sec_idx(j,k) ) then
+    !       tmp_idx = 0
+    !     end if
+    !   end do
+    ! end do
         
 
-    tmp_idx = 0
+    ! tmp_idx = 0
 
   end subroutine identify_sector_stencils_alt
 
@@ -1769,7 +1773,7 @@ module stencil_growing_routines
 
   contains
 
-  pure subroutine grow_stencil_basic( block_id, idx, N_cells, sz_in, sz_out, nbor_block, nbor_idx, nbor_degree, on_boundary, n_sec, n_sec_idx, sec_idx )
+  pure subroutine grow_stencil_basic( block_id, idx, N_cells, sz_in, sz_out, nbor_block, nbor_idx, nbor_degree, on_boundary, n_sec, sec_idx )
     use stencil_cell_derived_type, only : block_info
     use index_conversion,          only : local2global_bnd
     use stencil_indexing,          only : identify_sector_stencils, identify_sector_stencils_alt
@@ -1780,30 +1784,24 @@ module stencil_growing_routines
     integer, dimension(6*sz_in),          intent(out) :: nbor_block, nbor_idx, nbor_degree
     logical, dimension(6,6*sz_in), optional, intent(out) :: on_boundary
     integer,                       optional, intent(out) :: n_sec
-    integer, dimension(6),         optional, intent(out) :: n_sec_idx
-    integer, dimension(5,6),       optional, intent(out) :: sec_idx
+    integer, dimension(37),        optional, intent(out) :: sec_idx
     type(block_info), dimension(1) :: bi
     integer, dimension(4,6*sz_in) :: idx_list
-    integer, dimension(37) :: list
-    integer :: n_list
     integer :: i
 
     integer                 :: n_sec_
-    integer, dimension(6)   :: n_sec_idx_
-    integer, dimension(5,6) :: sec_idx_
+    integer, dimension(37)  :: sec_idx_
 
     bi(1) = block_info(block_id,N_cells)
     call grow_stencil_new_connected_block( block_id, idx, bi, sz_in, sz_out, idx_list, nbor_degree, on_boundary=on_boundary )
     call bi%destroy()
 
     n_sec_     = 0
-    n_sec_idx_ = 0
     sec_idx_   = 0
-    if ( present(n_sec).or.present(n_sec_idx).or.present(sec_idx)) then
-      call identify_sector_stencils(3,sz_out,idx_list(:,1:sz_out),n_sec_,n_sec_idx_,sec_idx_)
-      call identify_sector_stencils_alt(3,sz_out,idx_list(:,1:sz_out),n_list,list)
+    if ( present(n_sec).or.present(sec_idx)) then
+      ! call identify_sector_stencils(3,sz_out,idx_list(:,1:sz_out),n_sec_,n_sec_idx_,sec_idx_)
+      call identify_sector_stencils_alt(3,sz_out,idx_list(:,1:sz_out),n_sec_,sec_idx_)
       if ( present(n_sec)     ) n_sec     = n_sec_
-      if ( present(n_sec_idx) ) n_sec_idx = n_sec_idx_
       if ( present(sec_idx)   ) sec_idx   = sec_idx_
     end if
 
@@ -6288,12 +6286,14 @@ module reconstruct_cell_derived_type
     real(dp), dimension(:),     allocatable :: col_scale
     real(dp), dimension(:,:),   allocatable :: coefs
     real(dp), dimension(:,:),   allocatable :: Ainv
+    real(dp), dimension(:,:,:), allocatable :: Ainv_sec
+    real(dp), dimension(:,:),   allocatable :: col_scale_sec
+    real(dp), dimension(:,:,:), allocatable :: coefs_sec
     integer :: n_vars
     integer :: self_idx
     integer :: self_block
     integer :: n_nbor, n_bnd, n_sec
-    integer, dimension(:), allocatable :: nbor_block, nbor_idx, nbor_degree, bnd_idx, n_sec_idx
-    integer, dimension(:,:), allocatable :: sec_idx
+    integer, dimension(:), allocatable :: nbor_block, nbor_idx, nbor_degree, bnd_idx, sec_idx
   contains
     private
     procedure, public, pass :: destroy => destroy_cell_rec
@@ -6319,11 +6319,13 @@ contains
     if ( allocated(this%nbor_idx   ) ) deallocate( this%nbor_idx   )
     if ( allocated(this%nbor_degree) ) deallocate( this%nbor_degree)
     if ( allocated(this%bnd_idx    ) ) deallocate( this%bnd_idx    )
-    if ( allocated(this%n_sec_idx  ) ) deallocate( this%n_sec_idx  )
     if ( allocated(this%sec_idx    ) ) deallocate( this%sec_idx    )
     if ( allocated(this%coefs      ) ) deallocate( this%coefs      )
     if ( allocated(this%Ainv       ) ) deallocate( this%Ainv       )
     if ( allocated(this%col_scale  ) ) deallocate( this%col_scale  )
+    if ( allocated(this%coefs_sec      ) ) deallocate( this%coefs_sec      )
+    if ( allocated(this%Ainv_sec       ) ) deallocate( this%Ainv_sec       )
+    if ( allocated(this%col_scale_sec  ) ) deallocate( this%col_scale_sec  )
     this%n_vars     = 0
     this%self_idx   = 0
     this%self_block = 0
@@ -6332,12 +6334,12 @@ contains
     this%n_sec      = 0
   end subroutine destroy_cell_rec
 
-  pure function constructor( p, self_block, self_idx, n_nbor, n_bnd, nbor_block, nbor_idx, nbor_degree, bnd_idx, n_vars, quad, h_ref ) result(this)
+  pure function constructor( p, self_block, self_idx, n_nbor, n_bnd, n_sec, nbor_block, nbor_idx, nbor_degree, bnd_idx, sec_idx, n_vars, quad, h_ref ) result(this)
     use set_constants, only : zero,one
     use quadrature_derived_type, only : quad_t
     type(monomial_basis_t), intent(in)    :: p
-    integer,                intent(in)    :: self_block, self_idx, n_nbor, n_bnd
-    integer, dimension(:),  intent(in)    :: nbor_block, nbor_idx, nbor_degree, bnd_idx
+    integer,                intent(in)    :: self_block, self_idx, n_nbor, n_bnd, n_sec
+    integer, dimension(:),  intent(in)    :: nbor_block, nbor_idx, nbor_degree, bnd_idx, sec_idx
     integer,                intent(in)    :: n_vars
     type(quad_t),           intent(in)    :: quad
     real(dp), dimension(:), intent(in)    :: h_ref
@@ -6349,22 +6351,31 @@ contains
     this%self_block = self_block
     this%n_nbor     = n_nbor
     this%n_bnd      = n_bnd
+    this%n_sec      = n_sec
     allocate( this%nbor_block(  n_nbor ) )
     allocate( this%nbor_idx(    n_nbor ) )
     allocate( this%nbor_degree( n_nbor ) )
     allocate( this%bnd_idx( n_bnd ) )
+    allocate( this%sec_idx( n_sec ) )
     allocate( this%coefs( p%n_terms, n_vars ) )
     allocate( this%Ainv(  p%n_terms-1, n_nbor ) )
     allocate( this%col_scale( p%n_terms-1     ) )
-    allocate( this%n_sec_idx( 2*p%n_dim ) ) ! number of faces
-    allocate( this%sec_idx( 2*p%n_dim-1,2*p%n_dim ) )
+    allocate( this%coefs_sec( p%idx(1), n_sec, n_vars ) )
+    allocate( this%Ainv_sec(  p%idx(1)-1, n_sec, 2*p%n_dim-1 ) )
+    allocate( this%col_scale_sec( p%idx(1)-1, n_sec ) )
     this%nbor_block  = nbor_block(1:n_nbor)
     this%nbor_idx    = nbor_idx(1:n_nbor)
     this%nbor_degree = nbor_degree(1:n_nbor)
     this%bnd_idx     = bnd_idx(1:n_bnd)
+    this%sec_idx     = sec_idx(1:n_sec)
     this%coefs       = zero
     this%Ainv        = zero
     this%col_scale   = one
+
+    this%coefs_sec     = zero
+    this%Ainv_sec      = zero
+    this%col_scale_sec = one
+
   end function constructor
 
   pure function evaluate_reconstruction( this, p, point, n_terms,              &
@@ -6606,8 +6617,7 @@ contains
     integer :: min_sz, max_sz, n_nbors, max_degree, n_bnd, n_sec
     integer, dimension(6) :: bnd_idx
     integer, dimension(:), allocatable :: nbor_block, nbor_idx, nbor_degree
-    integer, dimension(2*n_dim) :: n_sec_idx
-    integer, dimension(2*n_dim-1,2*n_dim) :: sec_idx
+    integer, dimension(4*n_dim**2+1) :: sec_idx
     call this%destroy()
     allocate( this%n_cells( n_dim ) )
     this%n_skip         = n_skip
@@ -6631,7 +6641,7 @@ contains
     do i = 1,this%n_cells_total
       idx_tmp(1:this%n_dim) = global2local_bnd( i, lo(1:this%n_dim), hi(1:this%n_dim) )
       h_ref = this%get_cell_h_ref( grid%gblock(block_num), idx_tmp )
-      call this%get_nbors( grid, block_num, i, min_sz, n_nbors, nbor_block, nbor_idx, nbor_degree, n_bnd, bnd_idx, n_sec, n_sec_idx, sec_idx )
+      call this%get_nbors( grid, block_num, i, min_sz, n_nbors, nbor_block, nbor_idx, nbor_degree, n_bnd, bnd_idx, n_sec, sec_idx )
       associate( quad => grid%gblock(block_num)%grid_vars%quad( idx_tmp(1),    &
                                                                 idx_tmp(2),    &
                                                                 idx_tmp(3) ) )
@@ -6640,10 +6650,12 @@ contains
                                     i,                                     &
                                     n_nbors,                               &
                                     n_bnd,                                 &
+                                    n_sec,                                 &
                                     nbor_block,                            &
                                     nbor_idx,                              &
                                     nbor_degree,                           &
                                     bnd_idx,                               &
+                                    sec_idx,                               &
                                     n_var,                                 &
                                     quad,                                  &
                                     h_ref )
@@ -6839,35 +6851,31 @@ contains
     end do
   end function determine_maximum_degree
 
-  pure subroutine get_nbors( this, grid, blk, lin_idx, min_sz, n_nbors, nbor_block, nbor_idx, degree, n_bnd, bnd_idx, n_sec, n_sec_idx, sec_idx )
+  pure subroutine get_nbors( this, grid, blk, lin_idx, min_sz, n_nbors, nbor_block, nbor_idx, degree, n_bnd, bnd_idx, n_sec, sec_idx )
     use index_conversion,  only : global2local_bnd, local2global_bnd
     use stencil_growing_routines, only : grow_stencil_basic
     use grid_derived_type, only : grid_type
-    class(rec_block_t),     intent(in)  :: this
-    type(grid_type),        intent(in)  :: grid
-    integer,                intent(in)  :: blk, lin_idx, min_sz
-    integer,                intent(out) :: n_nbors
-    integer, dimension(6*min_sz), intent(out) :: nbor_block, nbor_idx, degree
-    integer,                intent(out) :: n_bnd
-    integer, dimension(6),  intent(out) :: bnd_idx
-    integer,                intent(out) :: n_sec
-    integer, dimension(2*this%n_dim), intent(out) :: n_sec_idx
-    integer, dimension(2*this%n_dim-1,2*this%n_dim), intent(out) :: sec_idx
+    class(rec_block_t),                    intent(in)  :: this
+    type(grid_type),                       intent(in)  :: grid
+    integer,                               intent(in)  :: blk, lin_idx, min_sz
+    integer,                               intent(out) :: n_nbors
+    integer, dimension(6*min_sz),          intent(out) :: nbor_block, nbor_idx, degree
+    integer,                               intent(out) :: n_bnd
+    integer, dimension(6),                 intent(out) :: bnd_idx
+    integer,                               intent(out) :: n_sec
+    integer, dimension(4*this%n_dim**2+1), intent(out) :: sec_idx
     integer, dimension(6*min_sz) :: tmp
     integer :: i
     logical, dimension(6,6*min_sz) :: on_boundary
     integer, dimension(3) :: idx_tmp, lo, hi
-
-    integer, dimension(6)   :: n_sec_idx_
-    integer, dimension(5,6) :: sec_idx_
+    integer, dimension(37) :: sec_idx_
     lo = 1
     hi = 1
     hi(1:this%n_dim) = this%n_cells
     idx_tmp = 1
     idx_tmp(1:this%n_dim) = global2local_bnd( lin_idx, lo(1:this%n_dim), hi(1:this%n_dim) )
-    call grow_stencil_basic( blk, idx_tmp, hi, min_sz, n_nbors, nbor_block, nbor_idx, degree, on_boundary=on_boundary, n_sec=n_sec, n_sec_idx=n_sec_idx_, sec_idx=sec_idx_ )
-    n_sec_idx(1:n_sec) = n_sec_idx_(1:n_sec)
-    sec_idx = sec_idx_(1:2*this%p%n_dim-1,1:2*this%p%n_dim)
+    call grow_stencil_basic( blk, idx_tmp, hi, min_sz, n_nbors, nbor_block, nbor_idx, degree, on_boundary=on_boundary, n_sec=n_sec, sec_idx=sec_idx_ )
+    sec_idx = sec_idx_(1:4*this%n_dim**2+1)
 
     !
     n_bnd   = count(on_boundary(1:2*this%p%n_dim,1))
@@ -6886,7 +6894,7 @@ contains
     n_nbors = n_nbors - 1
   end subroutine get_nbors
 
-    pure subroutine get_cell_LHS( this, lin_idx, term_end, LHS_m, LHS_n, LHS, scale, col_scale )
+  pure subroutine get_cell_LHS( this, lin_idx, term_end, LHS_m, LHS_n, LHS, scale, col_scale )
     use set_constants, only : zero, one
     class(rec_block_t),   intent(in)  :: this
     integer,                  intent(in)  :: lin_idx, term_end
@@ -6924,6 +6932,51 @@ contains
     end if
 
   end subroutine get_cell_LHS
+
+  pure subroutine get_cell_LHS_sec( this, lin_idx, s, LHS_m, LHS_n, LHS, scale, col_scale )
+    use set_constants, only : zero, one
+    class(rec_block_t),       intent(in)  :: this
+    integer,                  intent(in)  :: lin_idx, s
+    integer,                  intent(out) :: LHS_m, LHS_n
+    real(dp), dimension(:,:), intent(out) :: LHS
+    logical, optional,        intent(in)  :: scale
+    real(dp), dimension(this%p%idx(1)-1), optional, intent(out) :: col_scale
+    real(dp), dimension(this%p%idx(1)) :: shifted_moments
+    logical :: scale_
+    integer :: term_end, n_sec_idx, sec_idx
+    integer :: i, j, jk
+    scale_ = .true.
+    if ( present(scale) ) scale_ = scale
+    if ( .not. present(col_scale) ) scale_ = .false.
+
+    i = lin_idx
+    term_end = this%p%idx(1)
+    n_sec_idx = this%cells(i)%sec_idx(1+s)
+
+    LHS_m = n_sec_idx
+    LHS_n = term_end-1
+    LHS = zero
+    do j = 1,LHS_m
+      sec_idx = 1+this%cells(i)%sec_idx(1)+sum(this%cells(i)%sec_idx(2:j) )
+      jk = this%cells(i)%sec_idx( sec_idx )
+      shifted_moments = this%cells(i)%basis%shift_moments( this%p, this%cells( this%cells(i)%nbor_idx(jk) )%basis )
+      LHS(j,1:LHS_n) = shifted_moments(2:term_end)
+    end do
+
+    if ( scale_ ) then
+      ! Determine Scaling Factor
+      do i = 1, LHS_n
+        col_scale(i) = sum( abs(LHS(1:LHS_m,i)) )
+      end do
+      col_scale = one / col_scale
+
+      ! Scale the Matrix
+      do i = 1, LHS_n
+        LHS(1:LHS_m,i) = LHS(1:LHS_m,i) * col_scale(i)
+      end do
+    end if
+
+  end subroutine get_cell_LHS_sec
 
   pure subroutine get_cell_RHS( this, lin_idx, n_vars, var_idx, n_nbors, RHS )
     class(rec_block_t), intent(in)  :: this
