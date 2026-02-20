@@ -1,10 +1,10 @@
 &PROJECT
  JOB_NAME='test'
  VERBOSE_LEVEL=1,
- N_DIM=2,
+ N_DIM=3,
  REC_DEGREE=2,
  N_REC_VARS=1,
- N_NODES= 5, 5, 1,
+ N_NODES= 5, 5, 5,
  N_GHOST= 0,0,0,
  N_SKIP= 1,1,1,
  OLD=F,

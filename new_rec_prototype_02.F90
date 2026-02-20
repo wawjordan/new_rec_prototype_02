@@ -957,7 +957,7 @@ module stencil_indexing
   public :: linear_map_offsets_check
   public :: inviscid_stencil_indices_3D
   public :: viscous_offsets, muscl_offsets, center_offsets
-  public :: sector_offsets, identify_sector_stencils
+  public :: sector_offsets, identify_sector_stencils, identify_sector_stencils_alt
 
   public :: get_bounding_box
 
@@ -1299,7 +1299,6 @@ contains
     n_sec_idx = 0
     sec_idx   = 0
 
-    n_sec = 0
     ! for each face
     do d = 1,n_dim
       do s = -1,1,2
@@ -1327,6 +1326,98 @@ contains
       end do
     end do
   end subroutine identify_sector_stencils
+
+  pure subroutine identify_sector_stencils_alt(n_dim,n_stencil,stencil_idxs,n_list,list)
+    integer, intent(in) :: n_dim, n_stencil
+    integer, dimension(n_dim+1,n_stencil), intent(in) :: stencil_idxs
+    integer,                          intent(out) :: n_list
+    integer, dimension(4*n_dim**2+1), intent(out) :: list
+    integer :: d, s, i, j, k
+    integer, dimension(n_dim,2*n_dim-1) :: sec_off
+    integer, dimension(n_dim+1) :: tmp_idx
+    integer :: n_sec, n_sec2, offset
+    integer, dimension(2*n_dim) :: n_sec_idx,         n_sec_idx2
+    integer, dimension(2*n_dim-1,2*n_dim) :: sec_idx, sec_idx2
+    integer, dimension(4*n_dim**2+1) :: lis
+
+    n_sec     = 0
+    n_sec_idx = 0
+    sec_idx   = 0
+    ! for each face
+    do d = 1,n_dim
+      do s = -1,1,2
+        call sector_offsets(d*s,n_dim,sec_off)
+        ! for each cell in the sector stencil
+        do k = 1,2*n_dim-1
+          ! check against all cells in stencil
+          do j = 2,n_stencil
+            tmp_idx = stencil_idxs(:,1)
+            tmp_idx(2:) = tmp_idx(2:) + sec_off(:,k)
+
+            if (all(tmp_idx==stencil_idxs(:,j))) then
+
+              ! increment the counter for this sector stencil
+              n_sec_idx(n_sec+1) = n_sec_idx(n_sec+1) + 1
+              ! save the location in the stencil
+              sec_idx( n_sec_idx(n_sec+1), n_sec+1 ) = j
+            end if
+          end do
+        end do
+        ! if there was any intersection, then increment the counter over the sector stencils
+        if ( n_sec_idx(n_sec+1) > 0 ) then
+          n_sec = n_sec+1
+        end if
+      end do
+    end do
+
+    list      = 0
+    n_list    = 0
+    
+    list(1)         = n_sec
+    list(2:n_sec+1) = n_sec_idx(1:n_sec)
+    n_list = n_sec+1
+    do k = 1,n_sec
+      do j = 1,n_sec_idx(k)
+        n_list = n_list + 1
+        list(n_list) = sec_idx(j,k)
+      end do
+    end do
+
+    lis = list
+
+    ! check that you can recover the information
+    n_sec2     = 0
+    n_sec_idx2 = 0
+    sec_idx2   = 0
+
+    n_sec2 = lis(1)
+    do k = 1,lis(1)
+      n_sec_idx2(k) = lis(1+k)
+      offset = 1+lis(1)+sum(lis(2:k))
+      do j = 1,lis(1+k)
+        sec_idx2(j,k) = lis(offset+j)
+      end do
+    end do
+
+    if ( n_sec2 /= n_sec ) then
+      tmp_idx = 0
+    end if
+
+    do k = 1,n_sec
+      if ( n_sec_idx2(k) /= n_sec_idx(k) ) then
+        tmp_idx = 0
+      end if
+      do j = 1,n_sec_idx(k)
+        if ( sec_idx2(j,k) /= sec_idx(j,k) ) then
+          tmp_idx = 0
+        end if
+      end do
+    end do
+        
+
+    tmp_idx = 0
+
+  end subroutine identify_sector_stencils_alt
 
   pure subroutine viscous_offsets(direction,ndim,offsets)
     use index_conversion, only : shift_val_to_start
@@ -1681,7 +1772,7 @@ module stencil_growing_routines
   pure subroutine grow_stencil_basic( block_id, idx, N_cells, sz_in, sz_out, nbor_block, nbor_idx, nbor_degree, on_boundary, n_sec, n_sec_idx, sec_idx )
     use stencil_cell_derived_type, only : block_info
     use index_conversion,          only : local2global_bnd
-    use stencil_indexing,          only : identify_sector_stencils
+    use stencil_indexing,          only : identify_sector_stencils, identify_sector_stencils_alt
     integer,                              intent(in)  :: block_id
     integer, dimension(3),                intent(in)  :: idx, N_cells
     integer,                              intent(in)  :: sz_in
@@ -1693,6 +1784,8 @@ module stencil_growing_routines
     integer, dimension(5,6),       optional, intent(out) :: sec_idx
     type(block_info), dimension(1) :: bi
     integer, dimension(4,6*sz_in) :: idx_list
+    integer, dimension(37) :: list
+    integer :: n_list
     integer :: i
 
     integer                 :: n_sec_
@@ -1708,6 +1801,7 @@ module stencil_growing_routines
     sec_idx_   = 0
     if ( present(n_sec).or.present(n_sec_idx).or.present(sec_idx)) then
       call identify_sector_stencils(3,sz_out,idx_list(:,1:sz_out),n_sec_,n_sec_idx_,sec_idx_)
+      call identify_sector_stencils_alt(3,sz_out,idx_list(:,1:sz_out),n_list,list)
       if ( present(n_sec)     ) n_sec     = n_sec_
       if ( present(n_sec_idx) ) n_sec_idx = n_sec_idx_
       if ( present(sec_idx)   ) sec_idx   = sec_idx_
@@ -6209,6 +6303,10 @@ module reconstruct_cell_derived_type
     procedure, public, pass :: set_cell_coefs, get_cell_error
   end type rec_cell_t
 
+  ! type :: lin_rec_t
+  !   type
+  ! end type lin_rec_t
+
   interface rec_cell_t
     module procedure constructor
   end interface rec_cell_t
@@ -6505,9 +6603,11 @@ contains
     integer,  dimension(3)     :: idx_tmp, lo, hi
     real(dp), dimension(n_dim) :: h_ref
     integer :: i, n_interior, n_cell_nodes
-    integer :: min_sz, max_sz, n_nbors, max_degree, n_bnd
+    integer :: min_sz, max_sz, n_nbors, max_degree, n_bnd, n_sec
     integer, dimension(6) :: bnd_idx
     integer, dimension(:), allocatable :: nbor_block, nbor_idx, nbor_degree
+    integer, dimension(2*n_dim) :: n_sec_idx
+    integer, dimension(2*n_dim-1,2*n_dim) :: sec_idx
     call this%destroy()
     allocate( this%n_cells( n_dim ) )
     this%n_skip         = n_skip
@@ -6531,7 +6631,7 @@ contains
     do i = 1,this%n_cells_total
       idx_tmp(1:this%n_dim) = global2local_bnd( i, lo(1:this%n_dim), hi(1:this%n_dim) )
       h_ref = this%get_cell_h_ref( grid%gblock(block_num), idx_tmp )
-      call this%get_nbors( grid, block_num, i, min_sz, n_nbors, nbor_block, nbor_idx, nbor_degree, n_bnd, bnd_idx )
+      call this%get_nbors( grid, block_num, i, min_sz, n_nbors, nbor_block, nbor_idx, nbor_degree, n_bnd, bnd_idx, n_sec, n_sec_idx, sec_idx )
       associate( quad => grid%gblock(block_num)%grid_vars%quad( idx_tmp(1),    &
                                                                 idx_tmp(2),    &
                                                                 idx_tmp(3) ) )
@@ -6739,7 +6839,7 @@ contains
     end do
   end function determine_maximum_degree
 
-  pure subroutine get_nbors( this, grid, blk, lin_idx, min_sz, n_nbors, nbor_block, nbor_idx, degree, n_bnd, bnd_idx )
+  pure subroutine get_nbors( this, grid, blk, lin_idx, min_sz, n_nbors, nbor_block, nbor_idx, degree, n_bnd, bnd_idx, n_sec, n_sec_idx, sec_idx )
     use index_conversion,  only : global2local_bnd, local2global_bnd
     use stencil_growing_routines, only : grow_stencil_basic
     use grid_derived_type, only : grid_type
@@ -6750,9 +6850,9 @@ contains
     integer, dimension(6*min_sz), intent(out) :: nbor_block, nbor_idx, degree
     integer,                intent(out) :: n_bnd
     integer, dimension(6),  intent(out) :: bnd_idx
-    integer :: n_sec
-    integer, dimension(2*this%p%n_dim) :: n_sec_idx
-    integer, dimension(2*this%p%n_dim-1,2*this%p%n_dim) :: sec_idx
+    integer,                intent(out) :: n_sec
+    integer, dimension(2*this%n_dim), intent(out) :: n_sec_idx
+    integer, dimension(2*this%n_dim-1,2*this%n_dim), intent(out) :: sec_idx
     integer, dimension(6*min_sz) :: tmp
     integer :: i
     logical, dimension(6,6*min_sz) :: on_boundary
