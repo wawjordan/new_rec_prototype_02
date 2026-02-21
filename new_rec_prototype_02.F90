@@ -6344,6 +6344,9 @@ contains
     type(quad_t),           intent(in)    :: quad
     real(dp), dimension(:), intent(in)    :: h_ref
     type(rec_cell_t)                      :: this
+    integer :: n_sec_stencils
+
+    n_sec_stencils      = maxval(sec_idx(1:1+sec_idx(1)))
     call this%destroy()
     this%basis = zero_mean_basis_t( p, quad, h_ref )
     this%n_vars     = n_vars
@@ -6360,14 +6363,15 @@ contains
     allocate( this%coefs( p%n_terms, n_vars ) )
     allocate( this%Ainv(  p%n_terms-1, n_nbor ) )
     allocate( this%col_scale( p%n_terms-1     ) )
-    allocate( this%coefs_sec( p%idx(1), n_sec, n_vars ) )
-    allocate( this%Ainv_sec(  p%idx(1)-1, n_sec, 2*p%n_dim-1 ) )
-    allocate( this%col_scale_sec( p%idx(1)-1, n_sec ) )
+    allocate( this%coefs_sec( p%idx(1), n_vars, n_sec_stencils) )
+    allocate( this%Ainv_sec(  p%idx(1)-1, 2*p%n_dim-1, n_sec_stencils ) )
+    allocate( this%col_scale_sec( p%idx(1)-1, n_sec_stencils ) )
+    this%sec_idx     = sec_idx(1:n_sec)
     this%nbor_block  = nbor_block(1:n_nbor)
     this%nbor_idx    = nbor_idx(1:n_nbor)
     this%nbor_degree = nbor_degree(1:n_nbor)
     this%bnd_idx     = bnd_idx(1:n_bnd)
-    this%sec_idx     = sec_idx(1:n_sec)
+    
     this%coefs       = zero
     this%Ainv        = zero
     this%col_scale   = one
@@ -6578,6 +6582,7 @@ module rec_block_derived_type
     procedure, public, pass :: init_cells
     procedure, public, pass :: get_cell_error, get_cell_derivative_error
     procedure,         pass :: get_cell_LHS, get_cell_RHS
+    procedure,         pass :: get_cell_LHS_sec, get_cell_RHS_sec
     procedure,         pass :: determine_maximum_degree
   end type rec_block_t
 
@@ -6803,12 +6808,20 @@ contains
     real(dp), dimension(:,:), intent(inout) :: LHS
     integer,                  intent(in)    :: lin_idx
     integer,                  intent(in)    :: term_end
-    integer :: i, n, m
+    integer :: i, j, n, m
     i = lin_idx
     m = this%cells(i)%n_nbor
     n = this%p%n_terms
     call this%get_cell_LHS( i, term_end, m, n, LHS, scale=.true., col_scale=this%cells(i)%col_scale(1:term_end-1) )
     call compute_pseudo_inverse( m, n, LHS(1:m,1:n), this%cells(i)%Ainv(1:n,1:m) )
+
+    n = this%p%idx(1)-1
+    do j = 1,this%cells(i)%sec_idx(1)
+      m = this%cells(i)%sec_idx(1+j)
+      call this%get_cell_LHS_sec(i,j,m,n,LHS,scale=.true.,col_scale=this%cells(i)%col_scale_sec(1:this%p%idx(1)-1,j))
+      call compute_pseudo_inverse( m, n, LHS(1:m,1:n), this%cells(i)%Ainv_sec(1:n,1:m,j) )
+    end do
+    
   end subroutine init_cell
 
   subroutine init_cells( this, grid, term_start, term_end )
@@ -6941,10 +6954,10 @@ contains
     real(dp), dimension(:,:), intent(out) :: LHS
     logical, optional,        intent(in)  :: scale
     real(dp), dimension(this%p%idx(1)-1), optional, intent(out) :: col_scale
-    real(dp), dimension(this%p%idx(1)) :: shifted_moments
+    real(dp), dimension(this%p%n_terms) :: shifted_moments
     logical :: scale_
-    integer :: term_end, n_sec_idx, sec_idx
-    integer :: i, j, jk
+    integer :: term_end, n_sec_idx, offset
+    integer :: i, j, k
     scale_ = .true.
     if ( present(scale) ) scale_ = scale
     if ( .not. present(col_scale) ) scale_ = .false.
@@ -6956,11 +6969,11 @@ contains
     LHS_m = n_sec_idx
     LHS_n = term_end-1
     LHS = zero
-    do j = 1,LHS_m
-      sec_idx = 1+this%cells(i)%sec_idx(1)+sum(this%cells(i)%sec_idx(2:j) )
-      jk = this%cells(i)%sec_idx( sec_idx )
-      shifted_moments = this%cells(i)%basis%shift_moments( this%p, this%cells( this%cells(i)%nbor_idx(jk) )%basis )
-      LHS(j,1:LHS_n) = shifted_moments(2:term_end)
+    do k = 1,LHS_m
+      offset = 1+this%cells(i)%sec_idx(1)+sum(this%cells(i)%sec_idx(2:k) )
+      j = this%cells(i)%sec_idx( offset + s )
+      shifted_moments = this%cells(i)%basis%shift_moments( this%p, this%cells( this%cells(i)%nbor_idx(j) )%basis )
+      LHS(k,1:LHS_n) = shifted_moments(2:term_end)
     end do
 
     if ( scale_ ) then
@@ -6995,13 +7008,32 @@ contains
     end do
   end subroutine get_cell_RHS
 
+  pure subroutine get_cell_RHS_sec( this, lin_idx, s, n_vars, var_idx, n_nbors, RHS )
+    class(rec_block_t), intent(in)  :: this
+    integer,                intent(in)  :: lin_idx, s, n_vars
+    integer, dimension(:),  intent(in)  :: var_idx
+    integer,                intent(out) :: n_nbors
+    real(dp), dimension(:,:), intent(out) :: RHS
+    integer :: i, j, k, v, offset
+    i = lin_idx
+    n_nbors = this%cells(i)%sec_idx(1+s)
+    do k = 1,n_nbors
+      ! j = this%cells(i)%nbor_idx(k)
+      offset = 1+this%cells(i)%sec_idx(1)+sum(this%cells(i)%sec_idx(2:k) )
+      j = this%cells(i)%sec_idx( offset + s )
+      do v = 1,n_vars
+        RHS(k,var_idx(v)) = this%cells(j)%coefs(1,var_idx(v)) - this%cells(i)%coefs(1,var_idx(v))
+      end do
+    end do
+  end subroutine get_cell_RHS_sec
+
   pure subroutine solve_cell( this, lin_idx, term_end, n_var, var_idx )
     use set_constants, only : zero
     class(rec_block_t), intent(inout) :: this
     integer,                intent(in)    :: lin_idx, term_end, n_var
     integer, dimension(:),  intent(in)    :: var_idx
     real(dp), dimension(:,:), allocatable :: RHS
-    integer :: i, n, max_nbors, n_nbors, v
+    integer :: i, n, max_nbors, n_nbors, v, s
     i = lin_idx
     max_nbors = maxval(this%cells%n_nbor)
     allocate( RHS(this%cells(i)%n_nbor,n_var) )
@@ -7010,6 +7042,16 @@ contains
       do n = 2,term_end
         this%cells(i)%coefs(n,var_idx(v)) = this%cells(i)%col_scale(n-1)*dot_product( this%cells(i)%Ainv(n-1,:),RHS(1:n_nbors,v) )
       end do
+    end do
+    do s = 1,this%cells(i)%sec_idx(1)
+      call this%get_cell_RHS_sec(i,s,n_var,var_idx,n_nbors,RHS)
+      do v = 1,n_var
+        do n = 2,this%p%idx(1)
+          ! allocate( this%col_scale_sec( p%idx(1)-1, n_sec ) )
+          ! allocate( this%Ainv_sec(  p%idx(1)-1, n_sec, 2*p%n_dim-1 ) )
+          this%cells(i)%coefs_sec(n,var_idx(v),s) = this%cells(i)%col_scale_sec(n-1,s)*dot_product( this%cells(i)%Ainv_sec(n-1,1:n_nbors,s),RHS(1:n_nbors,v) )
+        end do
+      end do 
     end do
     deallocate( RHS )
   end subroutine solve_cell
