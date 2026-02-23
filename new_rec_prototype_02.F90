@@ -4606,6 +4606,17 @@ contains
 
 end module grid_derived_type
 
+module grid_local
+  use grid_derived_type, only : grid_type
+
+  implicit none
+  private
+  public :: grid
+
+  type(grid_type) :: grid
+
+end module grid_local
+
 module monomial_basis_derived_type
   implicit none
   private
@@ -5498,7 +5509,8 @@ module zero_mean_basis_derived_type
     private
     procedure, pass :: compute_grid_moments
     procedure, pass :: transform
-    procedure, public, pass :: shift_moments => compute_shifted_moments, compute_shifted_moments_quad
+    procedure, public, pass :: shift_moments   => compute_shifted_moments
+    procedure, public, pass :: shift_moments_q => compute_shifted_moments_quad
     procedure, nopass       :: length_scale  => get_length_scale_vector
     procedure, public, pass :: eval  => evaluate_basis
     procedure, public, pass :: deval => evaluate_basis_derivative
@@ -6574,8 +6586,8 @@ contains
     n_cells = this%sec_idx(1+s)
     if ( n < 1 .or. n > n_cells ) return
 
-    offset = 1 + n_stencils + sum( this%sec_idx(2:n) )
-    j = this%sec_idx( offset + s )
+    offset = 1 + n_stencils + sum( this%sec_idx(2:s) )
+    j = this%sec_idx( offset + n )
   end function get_sector_stencil_idx
   
 end module reconstruct_cell_derived_type
@@ -6953,7 +6965,7 @@ contains
     LHS = zero
     do j = 1,LHS_m
       shifted_moments = this%cells(i)%basis%shift_moments( this%p, this%cells( this%cells(i)%nbor_idx(j) )%basis )
-      LHS(j,1:LHS_n) = shifted_moments(2:term_end)
+      LHS(j,1:LHS_n) = shifted_moments(2:term_end) - this%cells(i)%basis%moments(2:term_end)
     end do
 
     if ( scale_ ) then
@@ -6972,37 +6984,42 @@ contains
   end subroutine get_cell_LHS
 
   pure subroutine get_cell_LHS_sec( this, lin_idx, s, LHS_m, LHS_n, LHS, scale, col_scale )
-    use set_constants, only : zero, one
-    use index_conversion, only : global2local
+    use set_constants, only : zero, one, near_zero, ten
+    ! use index_conversion, only : global2local
+    ! use grid_local,       only : grid
     class(rec_block_t),       intent(in)  :: this
     integer,                  intent(in)  :: lin_idx, s
     integer,                  intent(out) :: LHS_m, LHS_n
     real(dp), dimension(:,:), intent(out) :: LHS
     logical, optional,        intent(in)  :: scale
     real(dp), dimension(this%p%idx(1)-1), optional, intent(out) :: col_scale
-    real(dp), dimension(this%p%n_terms) :: shifted_moments
+    real(dp), dimension(this%p%n_terms) :: shifted_moments, shifted_moments_q
     logical :: scale_
     integer :: term_end, n_nbors
-    integer :: i, j, k, j_loc
-    integer, dimension(this%n_dim) :: nbor_idx, my_idx
+    integer :: i, j, k
+    ! integer, dimension(3) :: nbor_idx, my_idx
+    ! integer :: j_loc
     scale_ = .true.
     if ( present(scale) ) scale_ = scale
     if ( .not. present(col_scale) ) scale_ = .false.
 
+    my_idx = 1
+    nbor_idx = 1
+
     i = lin_idx
     term_end = this%p%idx(1)
     n_nbors = this%cells(i)%sec_idx(1+s)
-
+    ! my_idx(1:this%n_dim) = global2local(i,this%n_cells)
     LHS_m = n_nbors
     LHS_n = term_end-1
     LHS = zero
-    my_idx = global2local(i,this%n_cells)
+    
     do k = 1,LHS_m
       j = this%cells(i)%get_sector_stencil_idx(s,k)
-      j_loc = this%cells(i)%nbor_idx(j)
-      nbor_idx = global2local(j_loc,this%n_cells)
+      ! j_loc = this%cells(i)%nbor_idx(j)
+      ! nbor_idx(1:this%n_dim) = global2local(j_loc,this%n_cells)
       shifted_moments = this%cells(i)%basis%shift_moments( this%p, this%cells( this%cells(i)%nbor_idx(j) )%basis )
-      LHS(k,1:LHS_n) = shifted_moments(2:term_end)
+      LHS(k,1:LHS_n) = shifted_moments(2:term_end) - this%cells(i)%basis%moments(2:term_end)
     end do
 
     if ( scale_ ) then
@@ -8142,8 +8159,12 @@ contains
   subroutine make_grid( grid )
     use project_inputs,       only : n_dim, n_nodes, n_ghost, grid_perturb
     use grid_derived_type,    only : grid_type
+    use grid_local,           only : grid_l => grid
     type(grid_type), intent(inout) :: grid
     call setup_grid( n_dim, n_nodes, n_ghost, grid, delta=grid_perturb, x1_map=geom_space_wrapper )
+
+    ! copy of grid saved in a module to help with debugging
+    call setup_grid( n_dim, n_nodes, n_ghost, grid_l, delta=grid_perturb, x1_map=geom_space_wrapper )
   end subroutine make_grid
 
   subroutine make_reconstruction( grid, eval_fun, rec )
@@ -8168,6 +8189,7 @@ program main
   use grid_derived_type, only : grid_type
   use rec_derived_type, only : rec_t
   use function_holder_type, only : func_h_t
+  use grid_local,           only : grid_l => grid
   implicit none
   type(grid_type) :: grid
   type(rec_t) :: rec
@@ -8181,6 +8203,7 @@ program main
   call rec%solve( grid,ext_fun=eval_fun,soln_name=job_name,output_quad_order=out_quad_order,output_derivatives=out_derivatives)
   call rec%destroy()
   call grid%destroy()
+  call grid_l%destroy()
   
   if ( allocated(eval_fun) ) then
     call eval_fun%destroy()
