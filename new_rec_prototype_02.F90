@@ -1363,7 +1363,7 @@ contains
               ! increment the counter for this sector stencil
               n_sec_idx(n_sec+1) = n_sec_idx(n_sec+1) + 1
               ! save the location in the stencil
-              sec_idx( n_sec_idx(n_sec+1), n_sec+1 ) = j
+              sec_idx( n_sec_idx(n_sec+1), n_sec+1 ) = j - 1 ! offset, since we aren't counting the central cell
             end if
           end do
         end do
@@ -6301,6 +6301,7 @@ module reconstruct_cell_derived_type
     procedure, public, pass :: deval   => evaluate_reconstruction_derivative
     procedure, public, pass :: set_cell_avg => set_cell_avg_func, set_cell_avg_val
     procedure, public, pass :: set_cell_coefs, get_cell_error
+    procedure, public, pass :: get_sector_stencil_idx
   end type rec_cell_t
 
   ! type :: lin_rec_t
@@ -6494,11 +6495,18 @@ contains
     integer,  dimension(:), intent(in)    :: var_idx
     class(func_h_t),        intent(in)    :: eval_fun
     real(dp), dimension(n_var) :: tmp_val
-    integer :: v
+    integer :: v, s
     tmp_val = get_cell_avg( quad, n_dim, n_var, var_idx, eval_fun )
     do v = 1,n_var
       this%coefs(1,var_idx(v)) = tmp_val(v)
     end do
+
+    do s = 1,this%sec_idx(1)
+      do v = 1,n_var
+        this%coefs_sec(1,var_idx(v),s) = tmp_val(v)
+      end do
+    end do
+
   end subroutine set_cell_avg_func
 
   pure subroutine set_cell_coefs( this, n_coef, n_var, coef_idx, var_idx, vals )
@@ -6552,6 +6560,23 @@ contains
       err = err / sum( quad%quad_wts)**(one/real(norm,dp))
     end if
   end function get_cell_error
+
+  pure function get_sector_stencil_idx(this,s,n) result(j)
+    class(rec_cell_t),      intent(in) :: this
+    integer,                intent(in) :: s, n
+    integer                            :: j
+    integer :: n_stencils, n_cells, offset
+
+    j = -1
+    n_stencils = this%sec_idx(1)
+    if ( s < 1 .or. s > n_stencils ) return
+
+    n_cells = this%sec_idx(1+s)
+    if ( n < 1 .or. n > n_cells ) return
+
+    offset = 1 + n_stencils + sum( this%sec_idx(2:n) )
+    j = this%sec_idx( offset + s )
+  end function get_sector_stencil_idx
   
 end module reconstruct_cell_derived_type
 
@@ -6818,7 +6843,7 @@ contains
     n = this%p%idx(1)-1
     do j = 1,this%cells(i)%sec_idx(1)
       m = this%cells(i)%sec_idx(1+j)
-      call this%get_cell_LHS_sec(i,j,m,n,LHS,scale=.true.,col_scale=this%cells(i)%col_scale_sec(1:this%p%idx(1)-1,j))
+      call this%get_cell_LHS_sec(i,j,m,n,LHS,scale=.true.,col_scale=this%cells(i)%col_scale_sec(1:n,j))
       call compute_pseudo_inverse( m, n, LHS(1:m,1:n), this%cells(i)%Ainv_sec(1:n,1:m,j) )
     end do
     
@@ -6948,6 +6973,7 @@ contains
 
   pure subroutine get_cell_LHS_sec( this, lin_idx, s, LHS_m, LHS_n, LHS, scale, col_scale )
     use set_constants, only : zero, one
+    use index_conversion, only : global2local
     class(rec_block_t),       intent(in)  :: this
     integer,                  intent(in)  :: lin_idx, s
     integer,                  intent(out) :: LHS_m, LHS_n
@@ -6956,22 +6982,25 @@ contains
     real(dp), dimension(this%p%idx(1)-1), optional, intent(out) :: col_scale
     real(dp), dimension(this%p%n_terms) :: shifted_moments
     logical :: scale_
-    integer :: term_end, n_sec_idx, offset
-    integer :: i, j, k
+    integer :: term_end, n_nbors
+    integer :: i, j, k, j_loc
+    integer, dimension(this%n_dim) :: nbor_idx, my_idx
     scale_ = .true.
     if ( present(scale) ) scale_ = scale
     if ( .not. present(col_scale) ) scale_ = .false.
 
     i = lin_idx
     term_end = this%p%idx(1)
-    n_sec_idx = this%cells(i)%sec_idx(1+s)
+    n_nbors = this%cells(i)%sec_idx(1+s)
 
-    LHS_m = n_sec_idx
+    LHS_m = n_nbors
     LHS_n = term_end-1
     LHS = zero
+    my_idx = global2local(i,this%n_cells)
     do k = 1,LHS_m
-      offset = 1+this%cells(i)%sec_idx(1)+sum(this%cells(i)%sec_idx(2:k) )
-      j = this%cells(i)%sec_idx( offset + s )
+      j = this%cells(i)%get_sector_stencil_idx(s,k)
+      j_loc = this%cells(i)%nbor_idx(j)
+      nbor_idx = global2local(j_loc,this%n_cells)
       shifted_moments = this%cells(i)%basis%shift_moments( this%p, this%cells( this%cells(i)%nbor_idx(j) )%basis )
       LHS(k,1:LHS_n) = shifted_moments(2:term_end)
     end do
@@ -7018,9 +7047,7 @@ contains
     i = lin_idx
     n_nbors = this%cells(i)%sec_idx(1+s)
     do k = 1,n_nbors
-      ! j = this%cells(i)%nbor_idx(k)
-      offset = 1+this%cells(i)%sec_idx(1)+sum(this%cells(i)%sec_idx(2:k) )
-      j = this%cells(i)%sec_idx( offset + s )
+      j = this%cells(i)%nbor_idx( this%cells(i)%get_sector_stencil_idx(s,k) )
       do v = 1,n_vars
         RHS(k,var_idx(v)) = this%cells(j)%coefs(1,var_idx(v)) - this%cells(i)%coefs(1,var_idx(v))
       end do
@@ -7033,9 +7060,8 @@ contains
     integer,                intent(in)    :: lin_idx, term_end, n_var
     integer, dimension(:),  intent(in)    :: var_idx
     real(dp), dimension(:,:), allocatable :: RHS
-    integer :: i, n, max_nbors, n_nbors, v, s
+    integer :: i, n, n_nbors, v, s
     i = lin_idx
-    max_nbors = maxval(this%cells%n_nbor)
     allocate( RHS(this%cells(i)%n_nbor,n_var) )
     call this%get_cell_RHS(i,n_var,var_idx,n_nbors,RHS)
     do v = 1,n_var
@@ -7043,6 +7069,7 @@ contains
         this%cells(i)%coefs(n,var_idx(v)) = this%cells(i)%col_scale(n-1)*dot_product( this%cells(i)%Ainv(n-1,:),RHS(1:n_nbors,v) )
       end do
     end do
+
     do s = 1,this%cells(i)%sec_idx(1)
       call this%get_cell_RHS_sec(i,s,n_var,var_idx,n_nbors,RHS)
       do v = 1,n_var
