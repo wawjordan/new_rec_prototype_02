@@ -39,6 +39,8 @@ module project_inputs
   public :: allocate_inputs, deallocate_inputs
   public :: job_name, verbose_level
   public :: n_dim, rec_degree, n_rec_vars, n_nodes, n_ghost, n_skip, old, limit, lim_mod, use_vertex_nbors
+  public :: column_scaling
+  public :: use_cweno
   public :: geom_space_r, grid_perturb
   public :: out_quad_order, out_derivatives
   ! public :: space_coefs, time_coefs
@@ -58,6 +60,8 @@ module project_inputs
   logical  :: limit         = .false.
   integer  :: lim_mod       = 1
   logical  :: use_vertex_nbors = .true.
+  logical  :: column_scaling   = .true.
+  logical  :: use_cweno        = .false.
   real(dp) :: geom_space_r = 1.1_dp
   real(dp) :: grid_perturb = zero
   integer  :: out_quad_order=1
@@ -327,15 +331,19 @@ end module namelist_helper
 
 module nml_project
   use namelist_helper, only : nml_warnings
-  use project_inputs, only : job_name, verbose_level, n_dim, rec_degree, n_rec_vars,     &
-                             n_nodes, n_ghost, n_skip, old, limit, lim_mod, use_vertex_nbors,           &
-                             grid_perturb, geom_space_r, out_quad_order, out_derivatives
+  use project_inputs, only : job_name, verbose_level, n_dim, rec_degree,       &
+                             n_rec_vars, n_nodes, n_ghost, n_skip, old, limit, &
+                             lim_mod, use_vertex_nbors, column_scaling,        &
+                             use_cweno, grid_perturb, geom_space_r,            &
+                             out_quad_order, out_derivatives
   implicit none
   private
   public :: read_nml_project
   public :: write_nml_project
-  namelist /project/ job_name, verbose_level, n_dim, n_rec_vars, rec_degree, n_nodes,    &
-                     n_ghost, n_skip, old, limit, lim_mod, use_vertex_nbors, grid_perturb, geom_space_r, out_quad_order, out_derivatives
+  namelist /project/ job_name, verbose_level, n_dim, n_rec_vars, rec_degree,   &
+                     n_nodes, n_ghost, n_skip, old, limit, lim_mod,            &
+                     use_vertex_nbors, column_scaling, use_cweno,              &
+                     grid_perturb, geom_space_r, out_quad_order, out_derivatives
 contains
   subroutine read_nml_project( nml_unit, quiet, err_tot, option_error )
     use project_inputs, only : allocate_inputs
@@ -358,6 +366,8 @@ contains
     limit         = .false.
     lim_mod       = 1
     use_vertex_nbors = .true.
+    column_scaling   = .true.
+    use_cweno        = .false.
     grid_perturb  = zero
     geom_space_r  = one
     out_quad_order=1
@@ -2355,7 +2365,7 @@ contains
 !! Outputs:     LHS_plus: Pseudo-inverse of reconstruction LHS
 !<
 !=============================================================================80
-  subroutine compute_pseudo_inverse( LHS_m, LHS_n, LHS, LHS_plus )
+  subroutine compute_pseudo_inverse( LHS_m, LHS_n, LHS, LHS_plus, cond )
 
     use set_precision, only : dp
     use set_constants, only : zero, one, ten
@@ -2365,12 +2375,14 @@ contains
     integer,                          intent(in)  :: LHS_m, LHS_n
     real(dp), dimension(LHS_m,LHS_n), intent(in)  :: LHS
     real(dp), dimension(LHS_n,LHS_m), intent(out) :: LHS_plus
+    real(dp), optional,               intent(out) :: cond
 
     integer :: LDA, LDU, LDVT
     integer :: max_LHS_extents, min_LHS_extents
     integer :: LWORK
     integer :: INFO
     integer :: i, j
+    integer :: min_s_loc
 
     real(dp) :: machine_precision
     real(dp) :: abs_tolerance
@@ -2414,6 +2426,13 @@ contains
     !call sgesvd( 'A', 'A', LHS_m, LHS_n, LHS, LDA, S, U, LDU, VT, LDVT,        &
     !             WORK, LWORK, INFO )
 
+
+    ! Condition Number
+    if ( present(cond) ) then
+      min_s_loc = max(min_LHS_extents,count(S>zero))
+      cond = S(1)/S(min_s_loc)
+    end if
+    
     ! Determine Truncation Tolerance
     machine_precision = (ten)**(-precision(one))
     abs_tolerance     = sqrt(machine_precision)
@@ -6314,6 +6333,7 @@ module reconstruct_cell_derived_type
     procedure, public, pass :: set_cell_avg => set_cell_avg_func, set_cell_avg_val
     procedure, public, pass :: set_cell_coefs, get_cell_error
     procedure, public, pass :: get_sector_stencil_idx
+    procedure, public, pass :: get_nonlinear_weights_alt
   end type rec_cell_t
 
   ! type :: lin_rec_t
@@ -6589,6 +6609,164 @@ contains
     offset = 1 + n_stencils + sum( this%sec_idx(2:s) )
     j = this%sec_idx( offset + n )
   end function get_sector_stencil_idx
+
+  pure subroutine linear_weights(this,lambda,lambda_0)
+    use set_constants, only : one
+    class(rec_cell_t),                      intent(in) :: this
+    real(dp), dimension(0:this%sec_idx(1)), intent(out) :: lambda
+    real(dp), optional,                     intent(in)  :: lambda_0
+
+    lambda = one
+    lambda(0) = 1.0e5_dp
+    if (present(lambda_0)) lambda(0) = lambda_0
+    lambda = lambda / sum(lambda)
+  end subroutine linear_weights
+
+  pure subroutine get_oscillation_indicator_matrix( this, p, quad, term_start, term_end, A )
+    use set_constants, only : zero, one
+    use quadrature_derived_type,      only : quad_t
+    use monomial_basis_derived_type,  only : monomial_basis_t
+    class(rec_cell_t),                            intent(in)  :: this
+    type(monomial_basis_t),                       intent(in)  :: p
+    class(quad_t),                                intent(in)  :: quad
+    integer,                                      intent(in)  :: term_start
+    integer,                                      intent(in)  :: term_end
+    real(dp), dimension( term_end - term_start,                                &
+                         term_end - term_start ), intent(out) :: A
+    real(dp), dimension(term_end,term_end) :: d_basis
+    real(dp), dimension(p%n_dim) :: dij
+    real(dp) :: xdij_mag
+    integer :: q, l, m
+
+    A = zero
+    dij = this%basis%h_ref
+    do q = 1,quad%n_quad
+      d_basis = this%basis%scaled_basis_derivatives( p,                        &
+                                                     0,                        &
+                                                     term_end,                 &
+                                                     quad%quad_pts(:,q),       &
+                                                     dij )
+      ! LHS
+      do m = 1,term_end-term_start
+        do l = 1,term_end-term_start
+          A(l,m) = A(l,m) + quad%quad_wts(q)                                   &
+                          * dot_product( d_basis(:,l+term_start),              &
+                                         d_basis(:,m+term_start) )
+        end do
+      end do
+    end do
+    xdij_mag = one/norm2(dij)
+    A = A * xdij_mag
+  end subroutine get_oscillation_indicator_matrix
+
+  pure subroutine get_nonlinear_weights(this,p,term_start,term_end,A,n_var,var_idx,weights,coefs_out)
+    use set_constants, only : zero, one
+    use monomial_basis_derived_type,  only : monomial_basis_t
+    class(rec_cell_t),                            intent(in)  :: this
+    type(monomial_basis_t),                       intent(in)  :: p
+    integer,                                      intent(in)  :: term_start
+    integer,                                      intent(in)  :: term_end
+    real(dp), dimension( term_end - term_start,                                &
+                         term_end - term_start ), intent(in)  :: A
+    integer,                                      intent(in)  :: n_var
+    integer,  dimension(:),                       intent(in)  :: var_idx
+    real(dp), dimension(0:this%sec_idx(1),n_var), intent(out) :: weights
+    real(dp), dimension(term_end,n_var), optional,intent(out) :: coefs_out
+    real(dp), dimension(0:this%sec_idx(1)) :: lambda
+    real(dp), dimension(term_end,n_var,0:this%sec_idx(1)) :: coefs_s
+    
+    integer :: l, m, v, s
+    integer :: n_sec
+    real(dp), parameter :: epsi = 1.0e-14_dp
+    integer,  parameter :: r    = 4
+    real(dp) :: sigma
+
+
+    coefs_s = zero
+    coefs_out = zero
+
+    call linear_weights(this,lambda)
+
+    
+
+    n_sec = this%sec_idx(1)
+    do s = 1,n_sec
+      do v = 1,n_var
+        do m = 1,p%idx(1)
+          coefs_s(m,v,s) = this%coefs_sec(m,var_idx(v),s)
+        end do
+      end do
+    end do
+
+    do v = 1,n_var
+      do m = 1,term_end
+        coefs_s(m,v,0) = (1/lambda(0)) * ( this%coefs(m,var_idx(v)) - sum( lambda(1:) * coefs_s(m,v,1:) ) )
+      end do
+    end do
+
+    
+
+    do s = 0,n_sec
+      do v = 1,n_var
+        sigma = zero
+        ! do m = 1,term_end-term_start
+        !   do l = 1,term_end-term_start
+        !     sigma = sigma + A(l,m) * coefs_s(l+term_start,v,s) * coefs_s(m+term_start,v,s)
+        !   end do
+        ! end do
+        do m = 1,term_end-term_start
+          sigma = sigma + coefs_s(m+term_start,v,s)**2
+        end do
+        weights(s,v) = lambda(s)/( sigma + epsi)**r
+      end do
+    end do
+
+    do v = 1,n_var
+      weights(:,v) = weights(:,v)/sum( weights(:,v) )
+    end do
+
+    if ( present(coefs_out) ) then
+      do v = 1,n_var
+        coefs_out(1,v) = this%coefs(1,var_idx(v))
+        do m = term_start,term_end
+          coefs_out(m,v) = sum( weights(:,v) * coefs_s(m,v,:) )
+        end do
+      end do
+    end if
+
+  end subroutine get_nonlinear_weights
+
+  pure subroutine get_nonlinear_weights_alt(this,p,quad)
+    use set_constants, only : zero, one
+    use quadrature_derived_type,      only : quad_t
+    use monomial_basis_derived_type,  only : monomial_basis_t
+    class(rec_cell_t),                            intent(inout)  :: this
+    type(monomial_basis_t),                       intent(in)  :: p
+    type(quad_t),                                 intent(in)  :: quad
+    integer :: term_end, term_start, n_var
+    real(dp), dimension(:,:), allocatable :: A, weights, coefs_out
+    integer, dimension(this%n_vars) :: var_idx
+    integer :: i
+
+    term_start = 1
+    term_end   = p%n_terms
+    n_var      = this%n_vars
+    var_idx    = [(i,i=1,n_var)]
+    allocate(A( term_end - term_start, term_end - term_start ) )
+    allocate( weights(0:this%sec_idx(1),n_var) )
+    allocate(coefs_out(term_end,n_var))
+
+    call get_oscillation_indicator_matrix( this, p, quad, term_start, term_end, A )
+    call get_nonlinear_weights(this,p,term_start,term_end,A,n_var,var_idx,weights,coefs_out=coefs_out)
+
+    this%coefs = coefs_out
+    if (weights(1,1) > 0.001_dp ) then
+      term_start = 1
+    end if
+
+    deallocate(A,weights, coefs_out)
+  end subroutine get_nonlinear_weights_alt
+  
   
 end module reconstruct_cell_derived_type
 
@@ -6841,6 +7019,7 @@ contains
 
   subroutine init_cell( this, LHS, lin_idx, term_end )
     use math,              only : compute_pseudo_inverse
+    use project_inputs,    only : column_scaling
     class(rec_block_t),       intent(inout) :: this
     real(dp), dimension(:,:), intent(inout) :: LHS
     integer,                  intent(in)    :: lin_idx
@@ -6849,13 +7028,23 @@ contains
     i = lin_idx
     m = this%cells(i)%n_nbor
     n = this%p%n_terms
-    call this%get_cell_LHS( i, term_end, m, n, LHS, scale=.true., col_scale=this%cells(i)%col_scale(1:term_end-1) )
+    if ( column_scaling ) then
+      call this%get_cell_LHS( i, term_end, m, n, LHS, col_scale=this%cells(i)%col_scale(1:term_end-1) )
+    else
+      call this%get_cell_LHS( i, term_end, m, n, LHS )
+    end if
+    
     call compute_pseudo_inverse( m, n, LHS(1:m,1:n), this%cells(i)%Ainv(1:n,1:m) )
+
 
     n = this%p%idx(1)-1
     do j = 1,this%cells(i)%sec_idx(1)
       m = this%cells(i)%sec_idx(1+j)
-      call this%get_cell_LHS_sec(i,j,m,n,LHS,scale=.true.,col_scale=this%cells(i)%col_scale_sec(1:n,j))
+      if ( column_scaling ) then
+        call this%get_cell_LHS_sec(i,j,m,n,LHS,col_scale=this%cells(i)%col_scale_sec(1:n,j))
+      else
+        call this%get_cell_LHS_sec(i,j,m,n,LHS)
+      end if
       call compute_pseudo_inverse( m, n, LHS(1:m,1:n), this%cells(i)%Ainv_sec(1:n,1:m,j) )
     end do
     
@@ -6944,20 +7133,15 @@ contains
     n_nbors = n_nbors - 1
   end subroutine get_nbors
 
-  pure subroutine get_cell_LHS( this, lin_idx, term_end, LHS_m, LHS_n, LHS, scale, col_scale )
+  pure subroutine get_cell_LHS( this, lin_idx, term_end, LHS_m, LHS_n, LHS, col_scale )
     use set_constants, only : zero, one
     class(rec_block_t),   intent(in)  :: this
     integer,                  intent(in)  :: lin_idx, term_end
     integer,                  intent(out) :: LHS_m, LHS_n
     real(dp), dimension(:,:), intent(out) :: LHS
-    logical, optional,        intent(in)  :: scale
     real(dp), dimension(term_end-1), optional, intent(out) :: col_scale
     real(dp), dimension(this%p%n_terms) :: shifted_moments
-    logical :: scale_
     integer :: i, j
-    scale_ = .true.
-    if ( present(scale) ) scale_ = scale
-    if ( .not. present(col_scale) ) scale_ = .false.
 
     i = lin_idx
     LHS_m = this%cells(i)%n_nbor
@@ -6968,7 +7152,7 @@ contains
       LHS(j,1:LHS_n) = shifted_moments(2:term_end) - this%cells(i)%basis%moments(2:term_end)
     end do
 
-    if ( scale_ ) then
+    if ( present(col_scale) ) then
       ! Determine Scaling Factor
       do i = 1, LHS_n
         col_scale(i) = sum( abs(LHS(1:LHS_m,i)) )
@@ -6983,46 +7167,32 @@ contains
 
   end subroutine get_cell_LHS
 
-  pure subroutine get_cell_LHS_sec( this, lin_idx, s, LHS_m, LHS_n, LHS, scale, col_scale )
+  pure subroutine get_cell_LHS_sec( this, lin_idx, s, LHS_m, LHS_n, LHS, col_scale )
     use set_constants, only : zero, one, near_zero, ten
-    ! use index_conversion, only : global2local
-    ! use grid_local,       only : grid
     class(rec_block_t),       intent(in)  :: this
     integer,                  intent(in)  :: lin_idx, s
     integer,                  intent(out) :: LHS_m, LHS_n
     real(dp), dimension(:,:), intent(out) :: LHS
-    logical, optional,        intent(in)  :: scale
     real(dp), dimension(this%p%idx(1)-1), optional, intent(out) :: col_scale
-    real(dp), dimension(this%p%n_terms) :: shifted_moments, shifted_moments_q
+    real(dp), dimension(this%p%n_terms) :: shifted_moments
     logical :: scale_
     integer :: term_end, n_nbors
     integer :: i, j, k
-    ! integer, dimension(3) :: nbor_idx, my_idx
-    ! integer :: j_loc
-    scale_ = .true.
-    if ( present(scale) ) scale_ = scale
-    if ( .not. present(col_scale) ) scale_ = .false.
-
-    my_idx = 1
-    nbor_idx = 1
 
     i = lin_idx
     term_end = this%p%idx(1)
     n_nbors = this%cells(i)%sec_idx(1+s)
-    ! my_idx(1:this%n_dim) = global2local(i,this%n_cells)
     LHS_m = n_nbors
     LHS_n = term_end-1
     LHS = zero
     
     do k = 1,LHS_m
       j = this%cells(i)%get_sector_stencil_idx(s,k)
-      ! j_loc = this%cells(i)%nbor_idx(j)
-      ! nbor_idx(1:this%n_dim) = global2local(j_loc,this%n_cells)
       shifted_moments = this%cells(i)%basis%shift_moments( this%p, this%cells( this%cells(i)%nbor_idx(j) )%basis )
       LHS(k,1:LHS_n) = shifted_moments(2:term_end) - this%cells(i)%basis%moments(2:term_end)
     end do
 
-    if ( scale_ ) then
+    if ( present(col_scale) ) then
       ! Determine Scaling Factor
       do i = 1, LHS_n
         col_scale(i) = sum( abs(LHS(1:LHS_m,i)) )
@@ -7073,31 +7243,54 @@ contains
 
   pure subroutine solve_cell( this, lin_idx, term_end, n_var, var_idx )
     use set_constants, only : zero
+    use project_inputs, only : column_scaling, use_cweno
+    use grid_local,     only : grid
+    use index_conversion, only : global2local
     class(rec_block_t), intent(inout) :: this
     integer,                intent(in)    :: lin_idx, term_end, n_var
     integer, dimension(:),  intent(in)    :: var_idx
     real(dp), dimension(:,:), allocatable :: RHS
     integer :: i, n, n_nbors, v, s
+    integer, dimension(3) :: idx
     i = lin_idx
     allocate( RHS(this%cells(i)%n_nbor,n_var) )
     call this%get_cell_RHS(i,n_var,var_idx,n_nbors,RHS)
-    do v = 1,n_var
-      do n = 2,term_end
-        this%cells(i)%coefs(n,var_idx(v)) = this%cells(i)%col_scale(n-1)*dot_product( this%cells(i)%Ainv(n-1,:),RHS(1:n_nbors,v) )
-      end do
-    end do
-
-    do s = 1,this%cells(i)%sec_idx(1)
-      call this%get_cell_RHS_sec(i,s,n_var,var_idx,n_nbors,RHS)
+    if ( column_scaling ) then
       do v = 1,n_var
-        do n = 2,this%p%idx(1)
-          ! allocate( this%col_scale_sec( p%idx(1)-1, n_sec ) )
-          ! allocate( this%Ainv_sec(  p%idx(1)-1, n_sec, 2*p%n_dim-1 ) )
-          this%cells(i)%coefs_sec(n,var_idx(v),s) = this%cells(i)%col_scale_sec(n-1,s)*dot_product( this%cells(i)%Ainv_sec(n-1,1:n_nbors,s),RHS(1:n_nbors,v) )
+        do n = 2,term_end
+          this%cells(i)%coefs(n,var_idx(v)) = this%cells(i)%col_scale(n-1)*dot_product( this%cells(i)%Ainv(n-1,:),RHS(1:n_nbors,v) )
         end do
-      end do 
-    end do
+      end do
+      do s = 1,this%cells(i)%sec_idx(1)
+        call this%get_cell_RHS_sec(i,s,n_var,var_idx,n_nbors,RHS)
+        do v = 1,n_var
+          do n = 2,this%p%idx(1)
+            this%cells(i)%coefs_sec(n,var_idx(v),s) = this%cells(i)%col_scale_sec(n-1,s)*dot_product( this%cells(i)%Ainv_sec(n-1,1:n_nbors,s),RHS(1:n_nbors,v) )
+          end do
+        end do 
+      end do
+    else
+      do v = 1,n_var
+        do n = 2,term_end
+          this%cells(i)%coefs(n,var_idx(v)) = dot_product( this%cells(i)%Ainv(n-1,:),RHS(1:n_nbors,v) )
+        end do
+      end do
+      do s = 1,this%cells(i)%sec_idx(1)
+        call this%get_cell_RHS_sec(i,s,n_var,var_idx,n_nbors,RHS)
+        do v = 1,n_var
+          do n = 2,this%p%idx(1)
+            this%cells(i)%coefs_sec(n,var_idx(v),s) = dot_product( this%cells(i)%Ainv_sec(n-1,1:n_nbors,s),RHS(1:n_nbors,v) )
+          end do
+        end do 
+      end do
+    end if
     deallocate( RHS )
+
+    if (use_cweno) then
+      idx = 1
+      idx(1:this%n_dim) = global2local(i,this%n_cells)
+      call this%cells(i)%get_nonlinear_weights_alt(this%p,grid%gblock(1)%grid_vars%quad(idx(1),idx(2),idx(3)))
+    end if
   end subroutine solve_cell
 
   pure subroutine solve_block( this, term_end, n_var, var_idx )
