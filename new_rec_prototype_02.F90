@@ -40,7 +40,7 @@ module project_inputs
   public :: job_name, verbose_level
   public :: n_dim, rec_degree, n_rec_vars, n_nodes, n_ghost, n_skip, old, limit, lim_mod, use_vertex_nbors
   public :: column_scaling
-  public :: use_cweno
+  public :: use_cweno, epsilon_cweno, r_cweno, lambda_0_cweno
   public :: geom_space_r, grid_perturb
   public :: out_quad_order, out_derivatives
   ! public :: space_coefs, time_coefs
@@ -62,6 +62,9 @@ module project_inputs
   logical  :: use_vertex_nbors = .true.
   logical  :: column_scaling   = .true.
   logical  :: use_cweno        = .false.
+  real(dp) :: epsilon_cweno    = 1.0e-14_dp
+  real(dp) :: lambda_0_cweno   = 1.0e5_dp
+  integer  :: r_cweno          = 4
   real(dp) :: geom_space_r = 1.1_dp
   real(dp) :: grid_perturb = zero
   integer  :: out_quad_order=1
@@ -334,7 +337,8 @@ module nml_project
   use project_inputs, only : job_name, verbose_level, n_dim, rec_degree,       &
                              n_rec_vars, n_nodes, n_ghost, n_skip, old, limit, &
                              lim_mod, use_vertex_nbors, column_scaling,        &
-                             use_cweno, grid_perturb, geom_space_r,            &
+                             use_cweno, epsilon_cweno, r_cweno, lambda_0_cweno,&
+                             grid_perturb, geom_space_r,                       &
                              out_quad_order, out_derivatives
   implicit none
   private
@@ -342,11 +346,13 @@ module nml_project
   public :: write_nml_project
   namelist /project/ job_name, verbose_level, n_dim, n_rec_vars, rec_degree,   &
                      n_nodes, n_ghost, n_skip, old, limit, lim_mod,            &
-                     use_vertex_nbors, column_scaling, use_cweno,              &
+                     use_vertex_nbors, column_scaling,                         &
+                     use_cweno, epsilon_cweno, r_cweno, lambda_0_cweno,        &
                      grid_perturb, geom_space_r, out_quad_order, out_derivatives
 contains
   subroutine read_nml_project( nml_unit, quiet, err_tot, option_error )
     use project_inputs, only : allocate_inputs
+    use set_precision,  only : dp
     use set_constants,  only : zero, one
     integer, intent(in)    :: nml_unit
     logical, intent(in)    :: quiet
@@ -368,6 +374,9 @@ contains
     use_vertex_nbors = .true.
     column_scaling   = .true.
     use_cweno        = .false.
+    epsilon_cweno    = 1.0e-14_dp
+    r_cweno          = 4
+    lambda_0_cweno   = 1.0e5_dp
     grid_perturb  = zero
     geom_space_r  = one
     out_quad_order=1
@@ -6333,7 +6342,7 @@ module reconstruct_cell_derived_type
     procedure, public, pass :: set_cell_avg => set_cell_avg_func, set_cell_avg_val
     procedure, public, pass :: set_cell_coefs, get_cell_error
     procedure, public, pass :: get_sector_stencil_idx
-    procedure, public, pass :: get_nonlinear_weights_alt
+    procedure, public, pass :: get_nonlinear_weights, cweno
   end type rec_cell_t
 
   ! type :: lin_rec_t
@@ -6370,6 +6379,7 @@ contains
   pure function constructor( p, self_block, self_idx, n_nbor, n_bnd, n_sec, nbor_block, nbor_idx, nbor_degree, bnd_idx, sec_idx, n_vars, quad, h_ref ) result(this)
     use set_constants, only : zero,one
     use quadrature_derived_type, only : quad_t
+    use project_inputs,          only : use_cweno
     type(monomial_basis_t), intent(in)    :: p
     integer,                intent(in)    :: self_block, self_idx, n_nbor, n_bnd, n_sec
     integer, dimension(:),  intent(in)    :: nbor_block, nbor_idx, nbor_degree, bnd_idx, sec_idx
@@ -6377,9 +6387,9 @@ contains
     type(quad_t),           intent(in)    :: quad
     real(dp), dimension(:), intent(in)    :: h_ref
     type(rec_cell_t)                      :: this
-    integer :: n_sec_stencils
+    integer :: n_sec_cells
 
-    n_sec_stencils      = maxval(sec_idx(1:1+sec_idx(1)))
+    
     call this%destroy()
     this%basis = zero_mean_basis_t( p, quad, h_ref )
     this%n_vars     = n_vars
@@ -6387,19 +6397,14 @@ contains
     this%self_block = self_block
     this%n_nbor     = n_nbor
     this%n_bnd      = n_bnd
-    this%n_sec      = n_sec
     allocate( this%nbor_block(  n_nbor ) )
     allocate( this%nbor_idx(    n_nbor ) )
     allocate( this%nbor_degree( n_nbor ) )
     allocate( this%bnd_idx( n_bnd ) )
-    allocate( this%sec_idx( n_sec ) )
     allocate( this%coefs( p%n_terms, n_vars ) )
     allocate( this%Ainv(  p%n_terms-1, n_nbor ) )
     allocate( this%col_scale( p%n_terms-1     ) )
-    allocate( this%coefs_sec( p%idx(1), n_vars, n_sec_stencils) )
-    allocate( this%Ainv_sec(  p%idx(1)-1, 2*p%n_dim-1, n_sec_stencils ) )
-    allocate( this%col_scale_sec( p%idx(1)-1, n_sec_stencils ) )
-    this%sec_idx     = sec_idx(1:n_sec)
+    
     this%nbor_block  = nbor_block(1:n_nbor)
     this%nbor_idx    = nbor_idx(1:n_nbor)
     this%nbor_degree = nbor_degree(1:n_nbor)
@@ -6408,10 +6413,24 @@ contains
     this%coefs       = zero
     this%Ainv        = zero
     this%col_scale   = one
-
-    this%coefs_sec     = zero
-    this%Ainv_sec      = zero
-    this%col_scale_sec = one
+    if ( use_cweno ) then
+      n_sec_cells = maxval(sec_idx(1:1+sec_idx(1)))
+      allocate( this%sec_idx( n_sec ) )
+      allocate( this%coefs_sec(     p%idx(1)-1, n_vars, sec_idx(1) ) )
+      allocate( this%Ainv_sec(      p%idx(1)-1, n_sec_cells, sec_idx(1) ) )
+      allocate( this%col_scale_sec( p%idx(1)-1, sec_idx(1) ) )
+      this%sec_idx       = sec_idx(1:n_sec)
+      this%n_sec         = n_sec
+      this%coefs_sec     = zero
+      this%Ainv_sec      = zero
+      this%col_scale_sec = one
+    else
+      allocate( this%sec_idx(       0       ) )
+      allocate( this%coefs_sec(     0, 0, 0 ) )
+      allocate( this%Ainv_sec(      0, 0, 0 ) )
+      allocate( this%col_scale_sec( 0, 0    ) )
+      this%n_sec = 0
+    end if
 
   end function constructor
 
@@ -6521,6 +6540,7 @@ contains
   pure subroutine set_cell_avg_func( this, quad, n_dim, n_var,var_idx,eval_fun)
     use quadrature_derived_type, only : quad_t
     use function_holder_type,    only : func_h_t
+    use project_inputs,          only : use_cweno
     class(rec_cell_t),      intent(inout) :: this
     type(quad_t),           intent(in)    :: quad
     integer,                intent(in)    :: n_dim, n_var
@@ -6532,13 +6552,6 @@ contains
     do v = 1,n_var
       this%coefs(1,var_idx(v)) = tmp_val(v)
     end do
-
-    do s = 1,this%sec_idx(1)
-      do v = 1,n_var
-        this%coefs_sec(1,var_idx(v),s) = tmp_val(v)
-      end do
-    end do
-
   end subroutine set_cell_avg_func
 
   pure subroutine set_cell_coefs( this, n_coef, n_var, coef_idx, var_idx, vals )
@@ -6612,161 +6625,83 @@ contains
 
   pure subroutine linear_weights(this,lambda,lambda_0)
     use set_constants, only : one
+    use project_inputs, only : lambda_0_cweno
     class(rec_cell_t),                      intent(in) :: this
     real(dp), dimension(0:this%sec_idx(1)), intent(out) :: lambda
     real(dp), optional,                     intent(in)  :: lambda_0
 
     lambda = one
-    lambda(0) = 1.0e5_dp
+    lambda(0) = lambda_0_cweno
     if (present(lambda_0)) lambda(0) = lambda_0
     lambda = lambda / sum(lambda)
   end subroutine linear_weights
 
-  pure subroutine get_oscillation_indicator_matrix( this, p, quad, term_start, term_end, A )
-    use set_constants, only : zero, one
-    use quadrature_derived_type,      only : quad_t
-    use monomial_basis_derived_type,  only : monomial_basis_t
-    class(rec_cell_t),                            intent(in)  :: this
-    type(monomial_basis_t),                       intent(in)  :: p
-    class(quad_t),                                intent(in)  :: quad
-    integer,                                      intent(in)  :: term_start
-    integer,                                      intent(in)  :: term_end
-    real(dp), dimension( term_end - term_start,                                &
-                         term_end - term_start ), intent(out) :: A
-    real(dp), dimension(term_end,term_end) :: d_basis
-    real(dp), dimension(p%n_dim) :: dij
-    real(dp) :: xdij_mag
-    integer :: q, l, m
-
-    A = zero
-    dij = this%basis%h_ref
-    do q = 1,quad%n_quad
-      d_basis = this%basis%scaled_basis_derivatives( p,                        &
-                                                     0,                        &
-                                                     term_end,                 &
-                                                     quad%quad_pts(:,q),       &
-                                                     dij )
-      ! LHS
-      do m = 1,term_end-term_start
-        do l = 1,term_end-term_start
-          A(l,m) = A(l,m) + quad%quad_wts(q)                                   &
-                          * dot_product( d_basis(:,l+term_start),              &
-                                         d_basis(:,m+term_start) )
-        end do
-      end do
-    end do
-    xdij_mag = one/norm2(dij)
-    A = A * xdij_mag
-  end subroutine get_oscillation_indicator_matrix
-
-  pure subroutine get_nonlinear_weights(this,p,term_start,term_end,A,n_var,var_idx,weights,coefs_out)
+  pure subroutine get_nonlinear_weights(this,p,term_start,term_end,n_var,var_idx,weights,coefs_out)
     use set_constants, only : zero, one
     use monomial_basis_derived_type,  only : monomial_basis_t
+    use project_inputs, only : epsilon_cweno, r_cweno
     class(rec_cell_t),                            intent(in)  :: this
     type(monomial_basis_t),                       intent(in)  :: p
     integer,                                      intent(in)  :: term_start
     integer,                                      intent(in)  :: term_end
-    real(dp), dimension( term_end - term_start,                                &
-                         term_end - term_start ), intent(in)  :: A
     integer,                                      intent(in)  :: n_var
     integer,  dimension(:),                       intent(in)  :: var_idx
     real(dp), dimension(0:this%sec_idx(1),n_var), intent(out) :: weights
     real(dp), dimension(term_end,n_var), optional,intent(out) :: coefs_out
     real(dp), dimension(0:this%sec_idx(1)) :: lambda
-    real(dp), dimension(term_end,n_var,0:this%sec_idx(1)) :: coefs_s
-    
-    integer :: l, m, v, s
-    integer :: n_sec
-    real(dp), parameter :: epsi = 1.0e-14_dp
-    integer,  parameter :: r    = 4
-    real(dp) :: sigma
-
-
-    coefs_s = zero
-    coefs_out = zero
+    real(dp), dimension(term_end-1,n_var) :: coefs_s0
+    real(dp), dimension(p%idx(1)-1,n_var,this%sec_idx(1)) :: coefs_s
+    integer :: n_sec, lin_terms
+    integer :: v, s
 
     call linear_weights(this,lambda)
-
-    
-
-    n_sec = this%sec_idx(1)
-    do s = 1,n_sec
-      do v = 1,n_var
-        do m = 1,p%idx(1)
-          coefs_s(m,v,s) = this%coefs_sec(m,var_idx(v),s)
-        end do
-      end do
-    end do
-
+    n_sec     = this%sec_idx(1)
+    lin_terms = p%idx(1)
+    coefs_s  = zero
+    coefs_s0 = zero
     do v = 1,n_var
-      do m = 1,term_end
-        coefs_s(m,v,0) = (1/lambda(0)) * ( this%coefs(m,var_idx(v)) - sum( lambda(1:) * coefs_s(m,v,1:) ) )
+      coefs_s0(:,v) = this%coefs(2:,var_idx(v)) / lambda(0)
+      do s = 1,n_sec
+        coefs_s(:,v,s) = this%coefs_sec(:,var_idx(v),s)
+        coefs_s0(1:lin_terms-1,v) = coefs_s0(1:lin_terms-1,v) - lambda(s)/lambda(0) * coefs_s(:,v,s)
       end do
-    end do
-
-    
-
-    do s = 0,n_sec
-      do v = 1,n_var
-        sigma = zero
-        ! do m = 1,term_end-term_start
-        !   do l = 1,term_end-term_start
-        !     sigma = sigma + A(l,m) * coefs_s(l+term_start,v,s) * coefs_s(m+term_start,v,s)
-        !   end do
-        ! end do
-        do m = 1,term_end-term_start
-          sigma = sigma + coefs_s(m+term_start,v,s)**2
-        end do
-        weights(s,v) = lambda(s)/( sigma + epsi)**r
+      weights(0,v) = lambda(0)/( sum(coefs_s0(:,v)**2) + epsilon_cweno)**r_cweno
+      do s = 1,n_sec
+        weights(s,v) = lambda(s)/( sum(coefs_s(:,v,s)**2) + epsilon_cweno)**r_cweno
       end do
-    end do
-
-    do v = 1,n_var
       weights(:,v) = weights(:,v)/sum( weights(:,v) )
     end do
 
     if ( present(coefs_out) ) then
+      coefs_out = zero
       do v = 1,n_var
         coefs_out(1,v) = this%coefs(1,var_idx(v))
-        do m = term_start,term_end
-          coefs_out(m,v) = sum( weights(:,v) * coefs_s(m,v,:) )
+        do s = 1,n_sec
+          coefs_out(2:lin_terms,v) = coefs_out(2:lin_terms,v) + weights(s,v) * coefs_s(:,v,s)
         end do
+        coefs_out(2:,v) = coefs_out(2:,v) + weights(0,v) * coefs_s0(:,v)
       end do
     end if
 
   end subroutine get_nonlinear_weights
 
-  pure subroutine get_nonlinear_weights_alt(this,p,quad)
+  pure subroutine cweno(this,p)
     use set_constants, only : zero, one
-    use quadrature_derived_type,      only : quad_t
     use monomial_basis_derived_type,  only : monomial_basis_t
     class(rec_cell_t),                            intent(inout)  :: this
     type(monomial_basis_t),                       intent(in)  :: p
-    type(quad_t),                                 intent(in)  :: quad
-    integer :: term_end, term_start, n_var
-    real(dp), dimension(:,:), allocatable :: A, weights, coefs_out
+    real(dp), dimension(0:this%sec_idx(1),this%n_vars) ::weights
+    real(dp), dimension(size(this%coefs,1),size(this%coefs,2)) :: coefs_out
     integer, dimension(this%n_vars) :: var_idx
+    integer :: term_end, term_start, n_var
     integer :: i
-
     term_start = 1
     term_end   = p%n_terms
     n_var      = this%n_vars
     var_idx    = [(i,i=1,n_var)]
-    allocate(A( term_end - term_start, term_end - term_start ) )
-    allocate( weights(0:this%sec_idx(1),n_var) )
-    allocate(coefs_out(term_end,n_var))
-
-    call get_oscillation_indicator_matrix( this, p, quad, term_start, term_end, A )
-    call get_nonlinear_weights(this,p,term_start,term_end,A,n_var,var_idx,weights,coefs_out=coefs_out)
-
+    call this%get_nonlinear_weights(p,term_start,term_end,n_var,var_idx,weights,coefs_out=coefs_out)
     this%coefs = coefs_out
-    if (weights(1,1) > 0.001_dp ) then
-      term_start = 1
-    end if
-
-    deallocate(A,weights, coefs_out)
-  end subroutine get_nonlinear_weights_alt
-  
+  end subroutine cweno  
   
 end module reconstruct_cell_derived_type
 
@@ -7019,7 +6954,7 @@ contains
 
   subroutine init_cell( this, LHS, lin_idx, term_end )
     use math,              only : compute_pseudo_inverse
-    use project_inputs,    only : column_scaling
+    use project_inputs,    only : column_scaling, use_cweno
     class(rec_block_t),       intent(inout) :: this
     real(dp), dimension(:,:), intent(inout) :: LHS
     integer,                  intent(in)    :: lin_idx
@@ -7037,16 +6972,22 @@ contains
     call compute_pseudo_inverse( m, n, LHS(1:m,1:n), this%cells(i)%Ainv(1:n,1:m) )
 
 
-    n = this%p%idx(1)-1
-    do j = 1,this%cells(i)%sec_idx(1)
-      m = this%cells(i)%sec_idx(1+j)
+    if ( use_cweno ) then
+      n = this%p%idx(1)-1
       if ( column_scaling ) then
-        call this%get_cell_LHS_sec(i,j,m,n,LHS,col_scale=this%cells(i)%col_scale_sec(1:n,j))
+        do j = 1,this%cells(i)%sec_idx(1)
+          m = this%cells(i)%sec_idx(1+j)
+          call this%get_cell_LHS_sec(i,j,m,n,LHS,col_scale=this%cells(i)%col_scale_sec(1:n,j))
+          call compute_pseudo_inverse( m, n, LHS(1:m,1:n), this%cells(i)%Ainv_sec(1:n,1:m,j) )
+        end do
       else
-        call this%get_cell_LHS_sec(i,j,m,n,LHS)
+        do j = 1,this%cells(i)%sec_idx(1)
+          m = this%cells(i)%sec_idx(1+j)
+          call this%get_cell_LHS_sec(i,j,m,n,LHS)
+          call compute_pseudo_inverse( m, n, LHS(1:m,1:n), this%cells(i)%Ainv_sec(1:n,1:m,j) )
+        end do
       end if
-      call compute_pseudo_inverse( m, n, LHS(1:m,1:n), this%cells(i)%Ainv_sec(1:n,1:m,j) )
-    end do
+    end if
     
   end subroutine init_cell
 
@@ -7261,36 +7202,44 @@ contains
           this%cells(i)%coefs(n,var_idx(v)) = this%cells(i)%col_scale(n-1)*dot_product( this%cells(i)%Ainv(n-1,:),RHS(1:n_nbors,v) )
         end do
       end do
-      do s = 1,this%cells(i)%sec_idx(1)
-        call this%get_cell_RHS_sec(i,s,n_var,var_idx,n_nbors,RHS)
-        do v = 1,n_var
-          do n = 2,this%p%idx(1)
-            this%cells(i)%coefs_sec(n,var_idx(v),s) = this%cells(i)%col_scale_sec(n-1,s)*dot_product( this%cells(i)%Ainv_sec(n-1,1:n_nbors,s),RHS(1:n_nbors,v) )
-          end do
-        end do 
-      end do
     else
       do v = 1,n_var
         do n = 2,term_end
           this%cells(i)%coefs(n,var_idx(v)) = dot_product( this%cells(i)%Ainv(n-1,:),RHS(1:n_nbors,v) )
         end do
       end do
-      do s = 1,this%cells(i)%sec_idx(1)
-        call this%get_cell_RHS_sec(i,s,n_var,var_idx,n_nbors,RHS)
-        do v = 1,n_var
-          do n = 2,this%p%idx(1)
-            this%cells(i)%coefs_sec(n,var_idx(v),s) = dot_product( this%cells(i)%Ainv_sec(n-1,1:n_nbors,s),RHS(1:n_nbors,v) )
-          end do
-        end do 
-      end do
     end if
-    deallocate( RHS )
+    
 
+    ! if (use_cweno) then
+    !   idx = 1
+    !   idx(1:this%n_dim) = global2local(i,this%n_cells)
+    !   call this%cells(i)%get_nonlinear_weights_alt(this%p,grid%gblock(1)%grid_vars%quad(idx(1),idx(2),idx(3)))
+    ! end if
     if (use_cweno) then
-      idx = 1
-      idx(1:this%n_dim) = global2local(i,this%n_cells)
-      call this%cells(i)%get_nonlinear_weights_alt(this%p,grid%gblock(1)%grid_vars%quad(idx(1),idx(2),idx(3)))
+      if ( column_scaling ) then
+        do s = 1,this%cells(i)%sec_idx(1)
+          call this%get_cell_RHS_sec(i,s,n_var,var_idx,n_nbors,RHS)
+          do v = 1,n_var
+            do n = 1,this%p%idx(1)-1
+              this%cells(i)%coefs_sec(n,var_idx(v),s) = this%cells(i)%col_scale_sec(n,s)*dot_product( this%cells(i)%Ainv_sec(n,1:n_nbors,s),RHS(1:n_nbors,v) )
+            end do
+          end do 
+        end do
+      else
+        do s = 1,this%cells(i)%sec_idx(1)
+          call this%get_cell_RHS_sec(i,s,n_var,var_idx,n_nbors,RHS)
+          do v = 1,n_var
+            do n = 1,this%p%idx(1)-1
+              this%cells(i)%coefs_sec(n,var_idx(v),s) = dot_product( this%cells(i)%Ainv_sec(n,1:n_nbors,s),RHS(1:n_nbors,v) )
+            end do
+          end do 
+        end do
+      end if
+      call this%cells(i)%cweno(this%p)
     end if
+
+    deallocate( RHS )
   end subroutine solve_cell
 
   pure subroutine solve_block( this, term_end, n_var, var_idx )
