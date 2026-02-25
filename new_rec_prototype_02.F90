@@ -6726,7 +6726,7 @@ contains
     end do
 
     do v = 1,n_var
-      tau = real(n_sec,dp) * osc(0,v) + sum(osc(1:,v))
+      tau = abs( real(n_sec,dp) * osc(0,v) - sum(osc(1:,v)) )
       do s = 0,n_sec
         weights(s,v) = lambda(s) * ( one + ( tau/( osc(s,v) + epsilon_cweno) )**r_cweno )
       end do
