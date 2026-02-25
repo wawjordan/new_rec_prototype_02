@@ -6639,6 +6639,20 @@ contains
     lambda = lambda / sum(lambda)
   end subroutine linear_weights
 
+  pure subroutine linear_weights2(this,lambda,lambda_0)
+    use set_constants, only : one
+    use project_inputs, only : lambda_0_cweno
+    class(rec_cell_t),                      intent(in) :: this
+    real(dp), dimension(0:this%sec_idx(1)), intent(out) :: lambda
+    real(dp), optional,                     intent(in)  :: lambda_0
+
+    lambda = one
+    lambda(0) = lambda_0_cweno
+    if (present(lambda_0)) lambda(0) = lambda_0
+    lambda(0)  = one - one/lambda(0)
+    lambda(1:) = ( one - lambda(0) )/real(this%sec_idx(1),dp)
+  end subroutine linear_weights2
+
   pure subroutine get_nonlinear_weights(this,p,term_start,term_end,n_var,var_idx,weights,coefs_out)
     use set_constants, only : zero, one
     use monomial_basis_derived_type,  only : monomial_basis_t
@@ -6708,7 +6722,8 @@ contains
     integer :: v, s
     real(dp) :: tau
 
-    call linear_weights(this,lambda)
+    ! call linear_weights(this,lambda)
+    call linear_weights2(this,lambda)
     n_sec     = this%sec_idx(1)
     lin_terms = p%idx(1)
     coefs_s  = zero
@@ -6726,9 +6741,13 @@ contains
     end do
 
     do v = 1,n_var
-      tau = abs( real(n_sec,dp) * osc(0,v) - sum(osc(1:,v)) )
+      ! tau = abs( real(n_sec,dp) * osc(0,v) - sum(osc(1:,v)) )
+      ! do s = 0,n_sec
+      !   weights(s,v) = lambda(s) * ( one + ( tau/( osc(s,v) + epsilon_cweno) )**r_cweno )
+      ! end do
+      tau = ( sum( abs( osc(0,v) - osc(1:,v) ) )/real(n_sec,dp) )**r_cweno
       do s = 0,n_sec
-        weights(s,v) = lambda(s) * ( one + ( tau/( osc(s,v) + epsilon_cweno) )**r_cweno )
+        weights(s,v) = lambda(s) * ( one + tau/( osc(s,v) + epsilon_cweno) )
       end do
       weights(:,v) = weights(:,v)/sum( weights(:,v) )
     end do
