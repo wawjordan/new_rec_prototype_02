@@ -40,7 +40,7 @@ module project_inputs
   public :: job_name, verbose_level
   public :: n_dim, rec_degree, n_rec_vars, n_nodes, n_ghost, n_skip, old, limit, lim_mod, use_vertex_nbors
   public :: column_scaling
-  public :: use_cweno, epsilon_cweno, r_cweno, lambda_0_cweno
+  public :: use_cweno, epsilon_cweno, r_cweno, lambda_0_cweno, use_cwenoz
   public :: geom_space_r, grid_perturb
   public :: out_quad_order, out_derivatives
   ! public :: space_coefs, time_coefs
@@ -62,6 +62,7 @@ module project_inputs
   logical  :: use_vertex_nbors = .true.
   logical  :: column_scaling   = .true.
   logical  :: use_cweno        = .false.
+  logical  :: use_cwenoz       = .false.
   real(dp) :: epsilon_cweno    = 1.0e-14_dp
   real(dp) :: lambda_0_cweno   = 1.0e5_dp
   integer  :: r_cweno          = 4
@@ -338,7 +339,7 @@ module nml_project
                              n_rec_vars, n_nodes, n_ghost, n_skip, old, limit, &
                              lim_mod, use_vertex_nbors, column_scaling,        &
                              use_cweno, epsilon_cweno, r_cweno, lambda_0_cweno,&
-                             grid_perturb, geom_space_r,                       &
+                             use_cwenoz, grid_perturb, geom_space_r,           &
                              out_quad_order, out_derivatives
   implicit none
   private
@@ -348,7 +349,8 @@ module nml_project
                      n_nodes, n_ghost, n_skip, old, limit, lim_mod,            &
                      use_vertex_nbors, column_scaling,                         &
                      use_cweno, epsilon_cweno, r_cweno, lambda_0_cweno,        &
-                     grid_perturb, geom_space_r, out_quad_order, out_derivatives
+                     use_cwenoz, grid_perturb, geom_space_r,                   &
+                     out_quad_order, out_derivatives
 contains
   subroutine read_nml_project( nml_unit, quiet, err_tot, option_error )
     use project_inputs, only : allocate_inputs
@@ -374,6 +376,7 @@ contains
     use_vertex_nbors = .true.
     column_scaling   = .true.
     use_cweno        = .false.
+    use_cwenoz       = .false.
     epsilon_cweno    = 1.0e-14_dp
     r_cweno          = 4
     lambda_0_cweno   = 1.0e5_dp
@@ -6342,7 +6345,7 @@ module reconstruct_cell_derived_type
     procedure, public, pass :: set_cell_avg => set_cell_avg_func, set_cell_avg_val
     procedure, public, pass :: set_cell_coefs, get_cell_error
     procedure, public, pass :: get_sector_stencil_idx
-    procedure, public, pass :: get_nonlinear_weights, cweno
+    procedure, public, pass :: get_nonlinear_weights, get_nonlinear_weights_z, cweno
   end type rec_cell_t
 
   ! type :: lin_rec_t
@@ -6685,9 +6688,68 @@ contains
 
   end subroutine get_nonlinear_weights
 
+    pure subroutine get_nonlinear_weights_z(this,p,term_start,term_end,n_var,var_idx,weights,coefs_out)
+    use set_constants, only : zero, one
+    use monomial_basis_derived_type,  only : monomial_basis_t
+    use project_inputs, only : epsilon_cweno, r_cweno
+    class(rec_cell_t),                            intent(in)  :: this
+    type(monomial_basis_t),                       intent(in)  :: p
+    integer,                                      intent(in)  :: term_start
+    integer,                                      intent(in)  :: term_end
+    integer,                                      intent(in)  :: n_var
+    integer,  dimension(:),                       intent(in)  :: var_idx
+    real(dp), dimension(0:this%sec_idx(1),n_var), intent(out) :: weights
+    real(dp), dimension(term_end,n_var), optional,intent(out) :: coefs_out
+    real(dp), dimension(0:this%sec_idx(1)) :: lambda
+    real(dp), dimension(0:this%sec_idx(1),n_var) :: osc
+    real(dp), dimension(term_end-1,n_var) :: coefs_s0
+    real(dp), dimension(p%idx(1)-1,n_var,this%sec_idx(1)) :: coefs_s
+    integer :: n_sec, lin_terms
+    integer :: v, s
+    real(dp) :: tau
+
+    call linear_weights(this,lambda)
+    n_sec     = this%sec_idx(1)
+    lin_terms = p%idx(1)
+    coefs_s  = zero
+    coefs_s0 = zero
+    do v = 1,n_var
+      coefs_s0(:,v) = this%coefs(2:,var_idx(v)) / lambda(0)
+      do s = 1,n_sec
+        coefs_s(:,v,s) = this%coefs_sec(:,var_idx(v),s)
+        coefs_s0(1:lin_terms-1,v) = coefs_s0(1:lin_terms-1,v) - lambda(s)/lambda(0) * coefs_s(:,v,s)
+      end do
+      osc(0,v) = sum(coefs_s0(:,v)**2)
+      do s = 1,n_sec
+        osc(s,v) = sum(coefs_s(:,v,s)**2)
+      end do
+    end do
+
+    do v = 1,n_var
+      tau = real(n_sec,dp) * osc(0,v) + sum(osc(1:,v))
+      do s = 0,n_sec
+        weights(s,v) = lambda(s) * ( one + ( tau/( osc(s,v) + epsilon_cweno) )**r_cweno )
+      end do
+      weights(:,v) = weights(:,v)/sum( weights(:,v) )
+    end do
+
+    if ( present(coefs_out) ) then
+      coefs_out = zero
+      do v = 1,n_var
+        coefs_out(1,v) = this%coefs(1,var_idx(v))
+        do s = 1,n_sec
+          coefs_out(2:lin_terms,v) = coefs_out(2:lin_terms,v) + weights(s,v) * coefs_s(:,v,s)
+        end do
+        coefs_out(2:,v) = coefs_out(2:,v) + weights(0,v) * coefs_s0(:,v)
+      end do
+    end if
+
+  end subroutine get_nonlinear_weights_z
+
   pure subroutine cweno(this,p)
     use set_constants, only : zero, one
     use monomial_basis_derived_type,  only : monomial_basis_t
+    use project_inputs,               only : use_cwenoz
     class(rec_cell_t),                            intent(inout)  :: this
     type(monomial_basis_t),                       intent(in)  :: p
     real(dp), dimension(0:this%sec_idx(1),this%n_vars) ::weights
@@ -6699,7 +6761,11 @@ contains
     term_end   = p%n_terms
     n_var      = this%n_vars
     var_idx    = [(i,i=1,n_var)]
-    call this%get_nonlinear_weights(p,term_start,term_end,n_var,var_idx,weights,coefs_out=coefs_out)
+    if ( use_cwenoz ) then
+      call this%get_nonlinear_weights_z(p,term_start,term_end,n_var,var_idx,weights,coefs_out=coefs_out)
+    else
+      call this%get_nonlinear_weights(p,term_start,term_end,n_var,var_idx,weights,coefs_out=coefs_out)
+    end if
     this%coefs = coefs_out
   end subroutine cweno  
   
