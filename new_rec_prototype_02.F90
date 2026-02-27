@@ -38,7 +38,7 @@ module project_inputs
   private
   public :: allocate_inputs, deallocate_inputs
   public :: job_name, verbose_level
-  public :: n_dim, rec_degree, n_rec_vars, n_nodes, n_ghost, n_skip, old, limit, lim_mod, use_vertex_nbors
+  public :: n_dim, rec_degree, n_rec_vars, n_nodes, n_ghost, n_skip, old, limit
   public :: column_scaling
   public :: use_cweno, epsilon_cweno, r_cweno, lambda_0_cweno, use_cwenoz
   public :: geom_space_r, grid_perturb
@@ -58,8 +58,6 @@ module project_inputs
   integer, dimension(3) :: n_skip        = [1,1,1]
   logical  :: old           = .false.
   logical  :: limit         = .false.
-  integer  :: lim_mod       = 1
-  logical  :: use_vertex_nbors = .true.
   logical  :: column_scaling   = .true.
   logical  :: use_cweno        = .false.
   logical  :: use_cwenoz       = .false.
@@ -337,7 +335,7 @@ module nml_project
   use namelist_helper, only : nml_warnings
   use project_inputs, only : job_name, verbose_level, n_dim, rec_degree,       &
                              n_rec_vars, n_nodes, n_ghost, n_skip, old, limit, &
-                             lim_mod, use_vertex_nbors, column_scaling,        &
+                             column_scaling,                                   &
                              use_cweno, epsilon_cweno, r_cweno, lambda_0_cweno,&
                              use_cwenoz, grid_perturb, geom_space_r,           &
                              out_quad_order, out_derivatives
@@ -346,8 +344,7 @@ module nml_project
   public :: read_nml_project
   public :: write_nml_project
   namelist /project/ job_name, verbose_level, n_dim, n_rec_vars, rec_degree,   &
-                     n_nodes, n_ghost, n_skip, old, limit, lim_mod,            &
-                     use_vertex_nbors, column_scaling,                         &
+                     n_nodes, n_ghost, n_skip, old, limit, column_scaling,     &
                      use_cweno, epsilon_cweno, r_cweno, lambda_0_cweno,        &
                      use_cwenoz, grid_perturb, geom_space_r,                   &
                      out_quad_order, out_derivatives
@@ -372,8 +369,6 @@ contains
     n_skip        = [1,1,1]
     old           = .false.
     limit         = .false.
-    lim_mod       = 1
-    use_vertex_nbors = .true.
     column_scaling   = .true.
     use_cweno        = .false.
     use_cwenoz       = .false.
@@ -5138,12 +5133,16 @@ end module test_function_3
 
 module test_function_4
   use function_holder_type, only : func_h_t
+  use monomial_basis_derived_type, only : monomial_basis_t
   use set_precision,        only : dp
   implicit none
   private
   public :: test_fun4_t
 
   type, extends(func_h_t) :: test_fun4_t
+    type(monomial_basis_t) :: p
+    real(dp), dimension(:,:), allocatable :: dx, x0
+    real(dp), dimension(:,:), allocatable :: coefs
   contains
     procedure :: eval      => eval_test_fun4
     procedure :: dx_eval   => dx_eval_test_fun4
@@ -5154,25 +5153,60 @@ module test_function_4
     procedure constructor
   end interface test_fun4_t
 contains
-  function constructor(n_dim,n_eq) result(this)
+  function constructor(n_dim,n_eq,space_scale,space_origin) result(this)
+    use set_constants, only : zero, one, near_zero
     integer, intent(in) :: n_dim, n_eq
+    real(dp), dimension(n_dim,n_eq), optional, intent(in) :: space_scale, space_origin
     type(test_fun4_t)   :: this
+    integer :: i
     call this%destroy()
     call this%initialize_super(n_eq,n_dim)
     this%derivatives_implemented = .true.
+    allocate( this%dx(n_dim,n_eq) )
+    allocate( this%x0(n_dim,n_eq) )
+    this%dx = one
+    this%x0 = zero
+    if ( present(space_scale) ) then
+      this%dx = sign(one,space_scale) * max(near_zero,abs(space_scale))
+    end if
+    if ( present(space_origin) ) this%x0 = space_origin
+    this%p = monomial_basis_t(4,n_dim)
+    allocate( this%coefs(this%p%n_terms,n_eq) )
+    this%coefs      = zero
+    this%coefs(1:2,:) = one
+    do i = 2,this%p%total_degree
+      this%coefs(this%p%idx(i-1)+1,:) = -one
+    end do
   end function constructor
 
   pure elemental subroutine destroy_test_fun4(this)
     class(test_fun4_t), intent(inout) :: this
-    continue
+    if ( allocated(this%dx)   ) deallocate( this%dx   )
+    if ( allocated(this%x0)   ) deallocate( this%x0   )
+    if ( allocated(this%coefs) ) deallocate( this%coefs )
   end subroutine destroy_test_fun4
 
   pure function eval_test_fun4( this, x, t ) result(q)
+    use set_constants, only : zero
     class(test_fun4_t),        intent(in) :: this
     real(dp), dimension(:), intent(in) :: x
     real(dp), optional,     intent(in) :: t
-    real(dp), dimension(this%n_eq)     :: q
-    q = 1.0_dp + x(1) - x(1)**2 - x(1)**3 - x(1)**4
+    real(dp), dimension(this%n_eq)     :: q, q_compare
+    real(dp), dimension(this%n_dim,this%n_eq) :: x_bar
+    real(dp) :: tmp_val
+    integer :: i, v, coef
+    do i = 1,this%n_eq
+      x_bar(:,i) = x(1:this%n_dim)/this%dx(:,i) + this%x0(:,i)
+    end do
+    q = 1.0_dp + x_bar(:,1) - x_bar(:,1)**2 - x_bar(:,1)**3 - x_bar(:,1)**4
+    q_compare = zero
+    do i = 1,this%p%n_terms
+      do v = 1,this%n_eq
+        call this%p%eval(i,x_bar(:,v),tmp_val,coef)
+        q_compare(v) = q_compare(v) + this%coefs(i,v)*tmp_val
+      end do
+    end do
+    tmp_val = zero
   end function eval_test_fun4
 
   pure function dx_eval_test_fun4( this, x, t, order ) result(dqdx)
@@ -5180,29 +5214,50 @@ contains
     real(dp), dimension(:),                    intent(in) :: x
     real(dp),                        optional, intent(in) :: t
     integer,  dimension(this%n_dim), optional, intent(in) :: order
-    real(dp), dimension(this%n_eq)                        :: dqdx
+    real(dp), dimension(this%n_eq)                        :: dqdx, dqdx_compare
     integer :: tmp_order
+    real(dp), dimension(this%n_dim,this%n_eq) :: x_bar
+    integer :: i, v, coef, dcoef
+    real(dp) :: tmp_val
 
     if (present(order)) then
+      do i = 1,this%n_eq
+        x_bar(:,i) = x(1:this%n_dim)/this%dx(:,i) + this%x0(:,i)
+      end do
       tmp_order = order(1)
       select case(tmp_order)
       case(0)
-        dqdx = 1.0_dp + 1.0_dp*x(1) - 1.0_dp*x(1)**2 - 1.0_dp*x(1)**3 -  1.0_dp*x(1)**4
+        dqdx = 1.0_dp + 1.0_dp*x_bar(:,1) - 1.0_dp*x_bar(:,1)**2 - 1.0_dp*x_bar(:,1)**3 -  1.0_dp*x_bar(:,1)**4
       case(1)
         ! dqdx = one + x(1) - x(1)**2 - x(1)**3 - x(1)**4
-        dqdx =          1.0_dp      - 2.0_dp*x(1)    - 3.0_dp*x(1)**2 -  4.0_dp*x(1)**3
+        dqdx =          1.0_dp      - 2.0_dp*x_bar(:,1)    - 3.0_dp*x_bar(:,1)**2 -  4.0_dp*x_bar(:,1)**3
+        dqdx = dqdx/this%dx(:,1)
       case(2)
-        dqdx =                      - 2.0_dp         - 6.0_dp*x(1)    - 12.0_dp*x(1)**2
+        dqdx =                      - 2.0_dp         - 6.0_dp*x_bar(:,1)    - 12.0_dp*x_bar(:,1)**2
+        dqdx = dqdx/( this%dx(:,1)**2 )
       case(3)
-        dqdx =                                       - 6.0_dp         - 24.0_dp*x(1)
+        dqdx =                                       - 6.0_dp         - 24.0_dp*x_bar(:,1)
+        dqdx = dqdx/( this%dx(:,1)**3 )
       case(4)
         dqdx =                                                        - 24.0_dp
+        dqdx = dqdx/( this%dx(:,1)**4 )
       case default
         dqdx = 0.0_dp
       end select
+
+      dqdx_compare = 0.0_dp
+      do i = 1,this%p%n_terms
+        do v = 1,this%n_eq
+          call this%p%deval(i,x_bar(:,v),order,tmp_val,dcoef,coef)
+          tmp_val = tmp_val * real(dcoef,dp) / product( this%dx(:,v)**order )
+          dqdx_compare(v) = dqdx_compare(v) + this%coefs(i,v)*tmp_val
+        end do
+      end do
+      tmp_val = 0.0_dp
     else
       dqdx = this%eval(x,t=t)
     end if
+
   end function dx_eval_test_fun4
 
 end module test_function_4
@@ -5542,7 +5597,7 @@ module zero_mean_basis_derived_type
     procedure, pass :: transform
     procedure, public, pass :: shift_moments   => compute_shifted_moments
     procedure, public, pass :: shift_moments_q => compute_shifted_moments_quad
-    procedure, nopass       :: length_scale  => get_length_scale_vector
+    procedure, public, nopass :: length_scale  => get_length_scale_vector
     procedure, public, pass :: eval  => evaluate_basis
     procedure, public, pass :: deval => evaluate_basis_derivative
     procedure, public, pass :: rec_eval => evaluate_reconstruction
@@ -5868,6 +5923,36 @@ pure function transform_coefs(this,p,coefs,n_terms,n_var,var_idx) result(tcoefs)
   end do
 end function transform_coefs
 
+
+! pure function shift_coefs_to_other_cell(this,nbor,p,coefs,n_terms,n_var,var_idx) result(tcoefs)
+!   use set_constants, only : one
+!   class(zero_mean_basis_t),   intent(in) :: this, nbor
+!   type(monomial_basis_t),     intent(in) :: p
+!   real(dp), dimension(:,:),   intent(in) :: coefs
+!   integer,                    intent(in) :: n_terms, n_var
+!   integer,  dimension(n_var), intent(in) :: var_idx
+!   real(dp), dimension(n_terms,n_var)     :: tcoefs
+!   real(dp), dimension(n_terms-1) :: xden
+!   integer :: nd, nt, v, coef
+!   real(dp) :: dB, scale
+!   integer :: dcoef,coef
+!   real(dp), dimension(p%n_dim) :: point
+
+!   ! evaluate reconstruction at neighboring cell centroid
+!   point = nbor%x_ref
+
+!   tcoefs(1,:) = this%rec_eval(p,point,coefs,n_terms,n_var,var_idx)
+  
+!   ! evaluate derivatives at neighboring cell centroid
+!   do nd = 2,this%b(blk)%p%total_degree
+!     do nt = p%idx(nd-1)+1,p%idx(nd)
+!       call p%deval( nt, this%transform(p%n_dim,point), p%exponents(:,nt), dB, dcoef, coef )
+!       call p%eval(nt,nbor%h_ref/this%h_ref,scale,coef)
+!       tcoefs(nt,:) = coefs(nt,:)*dB*scale
+!     end do
+!   end do
+! end function shift_coefs_to_other_cell
+
 pure function evaluate_reconstruction( this, p, point, coefs, n_terms, n_var, var_idx ) result(val)
     use set_constants, only : zero
     class(zero_mean_basis_t),   intent(in) :: this
@@ -5904,7 +5989,7 @@ pure function evaluate_reconstruction( this, p, point, coefs, n_terms, n_var, va
     scale = one
     val = zero
     do n = 1,n_terms
-      basis(n) = this%deval(p,n,point,order) * this%length_scale(order,scale)
+      basis(n) = this%deval(p,n,point,order)
     end do
     do v = 1,n_var
       val(v) = val(v) + dot_product( coefs(1:n_terms,var_idx(v)), basis )
@@ -5929,6 +6014,7 @@ module zero_mean_limiter_type
     private
     procedure, public, pass :: destroy        => destroy_limiter
     procedure, public, pass :: update_limiter => update_alpha
+    procedure, public, pass :: update_min_max_point
   end type zero_mean_limit_t
   interface zero_mean_limit_t
     module procedure constructor
@@ -5991,7 +6077,20 @@ contains
       alpha_tmp = (u_min - u_c)/diff
       alpha = min(one,alpha_tmp)
     end if
+    diff = alpha
   end function get_alpha_val
+
+  pure subroutine update_min_max_point( this, p, basis, coefs, point )
+    class(zero_mean_limit_t),     intent(inout) :: this
+    class(monomial_basis_t),      intent(in)    :: p
+    class(zero_mean_basis_t),     intent(in)    :: basis
+    real(dp), dimension(:,:),     intent(in)    :: coefs
+    real(dp), dimension(p%n_dim), intent(in)    :: point
+    real(dp), dimension(this%n_vars) :: val
+    val = basis%rec_eval(p,point,coefs,p%n_terms,this%n_vars,this%var_idx)
+    this%v_min = min( this%v_min, val )
+    this%v_max = max( this%v_max, val )
+  end subroutine update_min_max_point
 
 
   ! call this for the corresponding cell vertices / quad_pts
@@ -6007,7 +6106,7 @@ contains
     u_i   = basis%rec_eval(p,point,coefs,p%n_terms,this%n_vars,this%var_idx)
     u_min = this%v_min
     u_max = this%v_max
-    alpha = get_alpha_val(u_c,u_i,this%v_min,this%v_max)
+    alpha = get_alpha_val( u_c, u_i, this%v_min, this%v_max )
     this%alpha = min( this%alpha, alpha )
   end subroutine update_alpha
 end module zero_mean_limiter_type
@@ -6194,6 +6293,10 @@ contains
     do n = 1,n_terms
       local_basis(n) = this%basis%deval(p,n,point,order)
     end do
+
+    if (order(1)==6) then
+      vv =2
+    end if
 
     if ( present(lim) ) then
       do v = 1,n_var
@@ -6867,7 +6970,7 @@ contains
     LHS = zero
     do j = 1,LHS_m
       shifted_moments = this%cells(i)%basis%shift_moments( this%p, this%cells( this%cells(i)%nbor_idx(j) )%basis )
-      LHS(j,1:LHS_n) = shifted_moments(2:term_end) - this%cells(i)%basis%moments(2:term_end)
+      LHS(j,1:LHS_n) = shifted_moments(2:term_end)
     end do
 
     if ( present(col_scale) ) then
@@ -6953,11 +7056,15 @@ contains
     i = lin_idx
     max_v = -large
     min_v =  large
+    tmp_val = this%cells(i)%coefs(1,var_idx)
+    min_v   = min(min_v,tmp_val)
+    max_v   = max(max_v,tmp_val)
     do k = 1,this%cells(i)%n_nbor
+      if ( this%cells(i)%nbor_degree(k)>1 ) return
       j = this%cells(i)%nbor_idx(k)
       tmp_val = this%cells(j)%coefs(1,var_idx)
       min_v   = min(min_v,tmp_val)
-      max_v   = min(max_v,tmp_val)
+      max_v   = max(max_v,tmp_val)
     end do
   end subroutine get_nbor_min_max
 
@@ -7102,7 +7209,6 @@ contains
   pure subroutine update_limiter_block( this, rblock, gblock )
     use set_precision,     only : dp
     use set_constants,     only : one, large, near_zero
-    use project_inputs,    only : lim_mod, use_vertex_nbors
     use index_conversion,  only : global2local
     use stencil_indexing,  only : get_all_interior_vertex_nbors
     use grid_derived_type, only : grid_block, pack_cell_node_coords
@@ -7117,11 +7223,34 @@ contains
     integer :: n_face_nbors, n_cell_nodes, n_vertex_nbors
     real(dp), dimension(3,product(rblock%n_skip+1)) :: nodes
 
+    n_cell_nodes = product(rblock%n_skip+1)
+
     do i = 1,this%n_cells_total
       call rblock%get_nbor_min_max(i,rblock%n_vars,[(n,n=1,rblock%n_vars)], this%lim(i)%v_min, this%lim(i)%v_max )
     end do
+
+    do i = 1,this%n_cells_total
+      idx = global2local(i,gblock%n_cells)
+      nodes = pack_cell_node_coords( global2local(i,gblock%n_cells), [1,1,1], gblock%n_nodes, rblock%n_skip, gblock%node_coords )
+
+      ! special treatment for boundaries
+      if ( rblock%cells(i)%n_bnd > 0 ) then
+        do n = 1,n_cell_nodes
+          call this%lim(i)%update_min_max_point(rblock%p,rblock%cells(i)%basis,rblock%cells(i)%coefs,nodes(:,n))
+        end do
+        ! do n = 1,rblock%cells(i)%n_bnd
+          ! need face to vertex mapping
+          ! loop over appropriate vertices
+        ! end do
+      end if
+
+      ! update limiter values
+      do n = 1,n_cell_nodes
+        call this%lim(i)%update_limiter(rblock%p,rblock%cells(i)%basis,nodes(:,n),rblock%cells(i)%coefs)
+      end do
+    end do
     
-    ! n_cell_nodes = product(rblock%n_skip+1)
+    n_cell_nodes = product(rblock%n_skip+1)
 
     ! ! first get the min-max values for coefficients
     ! if (use_vertex_nbors) then
@@ -8075,7 +8204,9 @@ contains
                                     space_scale=space_scale, &
                                     space_origin=space_origin) )
     case(4)
-      allocate( eval_fun, source=test_fun4_t( n_dim, n_rec_vars ) )
+      allocate( eval_fun, source=test_fun4_t( n_dim, n_rec_vars, &
+                                    space_scale=space_scale, &
+                                    space_origin=space_origin) )
     case(5)
       allocate( eval_fun, source=cts_t( n_dim, n_rec_vars,       &
                                     rand_coefs=rand_coefs,   &
