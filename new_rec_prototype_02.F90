@@ -4657,8 +4657,8 @@ module monomial_basis_derived_type
     integer, public, allocatable, dimension(:,:) :: diff_idx
   contains
     private
-    procedure, public, pass :: eval  => evaluate_monomial
-    procedure, public, pass :: deval => evaluate_monomial_derivative
+    procedure, public, pass :: eval_m  => evaluate_monomial
+    procedure, public, pass :: deval_m => evaluate_monomial_derivative
     procedure, public, pass :: destroy => destroy_monomial_basis_t
     procedure, public, pass :: check_gradient_indexing
   end type monomial_basis_t
@@ -4702,8 +4702,8 @@ contains
     real(dp),                        intent(out) :: val
     integer,                         intent(out) :: coef
     integer :: d, i
-    val  = one
-    coef = 1
+    val  = one ! << x^[a] >>
+    coef = 1   ! << [a]! >>
     do d = 1,this%n_dim
       do i = this%exponents(d,term),1,-1
         val  = val * x(d)
@@ -4724,9 +4724,9 @@ contains
     integer,                         intent(out) :: dcoef, coef
     integer :: d, i
     
-    dcoef = 1
-    coef  = 1
-    dval  = zero
+    dcoef = 1 ! D^[b](x^[a]) = ([a]!)/([a]-[b])! x^[a-b] => << ([a]!)/([a]-[b])! >>
+    coef  = 1 ! << ([a]-[b])! >>
+    dval  = zero ! << D^[b](x^[a]) >>
     if ( any( this%exponents(:,term)-order(1:this%n_dim) < 0 ) ) return
 
     dval  = one
@@ -5202,7 +5202,7 @@ contains
     q_compare = zero
     do i = 1,this%p%n_terms
       do v = 1,this%n_eq
-        call this%p%eval(i,x_bar(:,v),tmp_val,coef)
+        call this%p%eval_m(i,x_bar(:,v),tmp_val,coef)
         q_compare(v) = q_compare(v) + this%coefs(i,v)*tmp_val
       end do
     end do
@@ -5248,7 +5248,7 @@ contains
       dqdx_compare = 0.0_dp
       do i = 1,this%p%n_terms
         do v = 1,this%n_eq
-          call this%p%deval(i,x_bar(:,v),order,tmp_val,dcoef,coef)
+          call this%p%deval_m(i,x_bar(:,v),order,tmp_val,dcoef,coef)
           tmp_val = tmp_val * real(dcoef,dp) / product( this%dx(:,v)**order )
           dqdx_compare(v) = dqdx_compare(v) + this%coefs(i,v)*tmp_val
         end do
@@ -5265,7 +5265,6 @@ end module test_function_4
 module cylinder_cone_bump
   use set_precision, only : dp
   use function_holder_type, only : func_h_t
-  use monomial_basis_derived_type, only : monomial_basis_t
   implicit none
   private
   public :: ccb_t
@@ -5565,7 +5564,7 @@ contains
       q = this%a
       do n = 1,this%mono%n_terms
         do i = 1,this%n_eq
-          call this%mono%eval(n,x_bar(:,i),tmp_val,coef)
+          call this%mono%eval_m(n,x_bar(:,i),tmp_val,coef)
           q(i) = q(i) + this%b(i,n) * sin( this%c(i,n) * tmp_val + this%d(i,n) )
         end do
       end do
@@ -5598,13 +5597,12 @@ module zero_mean_basis_derived_type
     procedure, public, pass :: shift_moments   => compute_shifted_moments
     procedure, public, pass :: shift_moments_q => compute_shifted_moments_quad
     procedure, public, nopass :: length_scale  => get_length_scale_vector
-    procedure, public, pass :: eval  => evaluate_basis
-    procedure, public, pass :: deval => evaluate_basis_derivative
+    procedure, public, pass :: eval_b  => evaluate_basis
+    procedure, public, pass :: deval_b => evaluate_basis_derivative
     procedure, public, pass :: rec_eval => evaluate_reconstruction
     procedure, public, pass :: drec_eval => evaluate_reconstruction_derivative
-    procedure, public, pass :: scaled_basis_derivative, scaled_weighted_basis_derivative
-    procedure, public, pass :: scaled_basis_derivatives
-    procedure, public, pass :: transform_coefs
+    procedure, public, pass :: scaled_basis_derivative
+    procedure, public, pass :: transform_coefs, shift_coefs_from_nbor
     procedure, public, pass :: destroy => destroy_zero_mean_basis_t
 
   end type zero_mean_basis_t
@@ -5661,7 +5659,7 @@ pure function compute_grid_moments(this,p,quad) result(moments)
   end do
   do n = 1,p%n_terms
     do q = 1,quad%n_quad
-      call p%eval( n, xtmp(:,q), tmp(q), coef )
+      call p%eval_m( n, xtmp(:,q), tmp(q), coef )
     end do
     moments(n) = quad%integrate(tmp)
   end do
@@ -5739,7 +5737,7 @@ pure function compute_shifted_moments_quad(this,p,quad) result(moments)
   moments = zero
   do n = 2,p%n_terms
     do q = 1,quad%n_quad
-      tmp(q) = this%eval(p,n,quad%quad_pts(:,q))
+      tmp(q) = this%eval_b(p,n,quad%quad_pts(:,q))
     end do
     moments(n) = quad%integrate(tmp)
   end do
@@ -5756,7 +5754,7 @@ pure function evaluate_basis(this,p,term,point) result(B)
   integer :: coef
   B = one
   if (term == 1) return
-  call p%eval( term, this%transform(p%n_dim,point), B, coef )
+  call p%eval_m( term, this%transform(p%n_dim,point), B, coef )
   B = B - this%moments(term)
 end function evaluate_basis
 
@@ -5771,14 +5769,14 @@ pure function evaluate_basis_derivative(this,p,term,point,order) result(dB)
   integer :: dcoef,coef
 
   if (all(order==0)) then
-    dB =  this%eval(p,term,point)
+    dB =  this%eval_b(p,term,point)
     return
   end if
 
   dB = zero
   if (term==1) return
 
-  call p%deval( term, this%transform(p%n_dim,point), order, dB, dcoef, coef )
+  call p%deval_m( term, this%transform(p%n_dim,point), order, dB, dcoef, coef )
   dB = dB * real( dcoef, dp ) / product( this%h_ref ** order(1:p%n_dim) )
 end function evaluate_basis_derivative
 
@@ -5810,89 +5808,10 @@ pure function scaled_basis_derivative( this, p, term_idx, diff_idx,            &
   real(dp), dimension(:),   intent(in) :: scale
   real(dp)                             :: derivative
   real(dp) :: L
-  derivative = this%deval( p, term_idx, point, p%exponents(:,diff_idx) )
+  derivative = this%deval_b( p, term_idx, point, p%exponents(:,diff_idx) )
   L = this%length_scale( p%exponents(:,diff_idx), scale )
   derivative = derivative * L
 end function scaled_basis_derivative
-
-pure function scaled_weighted_basis_derivative( this, p, term_idx, diff_idx,            &
-                                       point, scale, weights ) result(derivative)
-  class(zero_mean_basis_t), intent(in) :: this
-  type(monomial_basis_t),   intent(in) :: p
-  integer,                  intent(in) :: term_idx, diff_idx
-  real(dp), dimension(:),   intent(in) :: point
-  real(dp), dimension(:),   intent(in) :: scale
-  real(dp), dimension(0:p%total_degree), intent(in) :: weights
-  real(dp)                             :: derivative
-  real(dp) :: L
-  derivative = this%deval( p, term_idx, point, p%exponents(:,diff_idx) )
-  L = this%length_scale( p%exponents(:,diff_idx), scale )
-  derivative = derivative * L * weights( sum( p%exponents(:,diff_idx) ) )
-end function scaled_weighted_basis_derivative
-
-! pure function scaled_basis_derivatives( this, p, term_start, term_end,         &
-!                                         point, scale ) result(derivatives)
-!   use set_constants, only : zero
-!   class(zero_mean_basis_t),                 intent(in) :: this
-!   type(monomial_basis_t),                   intent(in) :: p
-!   integer,                                  intent(in) :: term_start, term_end
-!   real(dp), dimension(:),                   intent(in) :: point
-!   real(dp), dimension(:),                   intent(in) :: scale
-!   real(dp), dimension(term_end, term_end - term_start) :: derivatives
-!   integer :: i, j
-!   derivatives = zero
-!   ! outer loop over basis functions
-!   do j = term_start+1,term_end
-!     ! inner loop over derivatives
-!     do i = 1,j
-!       derivatives(i,j-term_start) = this%scaled_basis_derivative( p,           &
-!                                                                   j,           &
-!                                                                   i,           &
-!                                                                   point,       &
-!                                                                   scale )
-!     end do
-!   end do
-! end function scaled_basis_derivatives
-
-pure function scaled_basis_derivatives( this, p, term_start, term_end,         &
-                                        point, scale, weights ) result(derivatives)
-  use set_constants, only : zero
-  class(zero_mean_basis_t),                 intent(in) :: this
-  type(monomial_basis_t),                   intent(in) :: p
-  integer,                                  intent(in) :: term_start, term_end
-  real(dp), dimension(:),                   intent(in) :: point
-  real(dp), dimension(:),                   intent(in) :: scale
-  real(dp), dimension(0:p%total_degree), optional, intent(in) :: weights
-  real(dp), dimension(term_end, term_end - term_start) :: derivatives
-  integer :: i, j
-  derivatives = zero
-  if ( present(weights) ) then
-    ! outer loop over basis functions
-    do j = term_start+1,term_end
-      ! inner loop over derivatives
-      do i = 1,j
-        derivatives(i,j-term_start) = this%scaled_weighted_basis_derivative( p,  &
-                                                                    j,           &
-                                                                    i,           &
-                                                                    point,       &
-                                                                    scale,       &
-                                                                    weights )
-      end do
-    end do
-  else
-    ! outer loop over basis functions
-    do j = term_start+1,term_end
-      ! inner loop over derivatives
-      do i = 1,j
-        derivatives(i,j-term_start) = this%scaled_basis_derivative( p,           &
-                                                                    j,           &
-                                                                    i,           &
-                                                                    point,       &
-                                                                    scale )
-      end do
-    end do
-  end if
-end function scaled_basis_derivatives
 
 pure function transform_coefs(this,p,coefs,n_terms,n_var,var_idx) result(tcoefs)
   use set_constants, only : one
@@ -5905,17 +5824,9 @@ pure function transform_coefs(this,p,coefs,n_terms,n_var,var_idx) result(tcoefs)
   real(dp), dimension(n_terms-1) :: xden
   integer :: n, v, coef
 
-  ! do n = 1,n_terms
-  !   call p%eval(n,this%h_ref,xden(n),coef)
-  ! end do
-  ! xden = one / xden
-  ! do v = 1,n_var
-  !   tcoefs(:,v) = coefs(1:n_terms,var_idx(v)) * xden
-  ! end do
-
   tcoefs(1,:) = this%rec_eval(p,this%x_ref,coefs,n_terms,n_var,var_idx)
   do n = 2,n_terms
-    call p%eval(n,this%h_ref,xden(n-1),coef)
+    call p%eval_m(n,this%h_ref,xden(n-1),coef)
   end do
   xden = one / xden
   do v = 1,n_var
@@ -5924,34 +5835,34 @@ pure function transform_coefs(this,p,coefs,n_terms,n_var,var_idx) result(tcoefs)
 end function transform_coefs
 
 
-! pure function shift_coefs_to_other_cell(this,nbor,p,coefs,n_terms,n_var,var_idx) result(tcoefs)
-!   use set_constants, only : one
-!   class(zero_mean_basis_t),   intent(in) :: this, nbor
-!   type(monomial_basis_t),     intent(in) :: p
-!   real(dp), dimension(:,:),   intent(in) :: coefs
-!   integer,                    intent(in) :: n_terms, n_var
-!   integer,  dimension(n_var), intent(in) :: var_idx
-!   real(dp), dimension(n_terms,n_var)     :: tcoefs
-!   real(dp), dimension(n_terms-1) :: xden
-!   integer :: nd, nt, v, coef
-!   real(dp) :: dB, scale
-!   integer :: dcoef,coef
-!   real(dp), dimension(p%n_dim) :: point
+pure function shift_coefs_from_nbor(this,nbor,p,nbor_coefs,n_terms,n_var,var_idx) result(tcoefs)
+  use set_constants, only : one
+  class(zero_mean_basis_t),   intent(in) :: this, nbor
+  type(monomial_basis_t),     intent(in) :: p
+  real(dp), dimension(:,:),   intent(in) :: nbor_coefs
+  integer,                    intent(in) :: n_terms, n_var
+  integer,  dimension(n_var), intent(in) :: var_idx
+  real(dp), dimension(n_terms,n_var)     :: tcoefs
+  integer :: n
+  integer :: dc,fact_coef
+  real(dp) :: scale
+  real(dp), dimension(p%n_dim) :: point, rat
+  integer, dimension(p%n_dim) :: order
 
-!   ! evaluate reconstruction at neighboring cell centroid
-!   point = nbor%x_ref
+  ! evaluate nbor reconstruction at cell centroid
+  point = this%x_ref
+  tcoefs(1,:) = nbor%rec_eval(p,point,nbor_coefs,n_terms,n_var,var_idx)
+  do n = 2,n_terms
+    call p%eval_m(n,this%h_ref/nbor%h_ref,scale,fact_coef)
+    scale = scale / real(fact_coef,dp)
+    order = p%exponents(:,n)
+    tcoefs(n,:) = nbor%drec_eval(p,point,nbor_coefs,n_terms,n_var,var_idx,order)
+    tcoefs(n,:) = scale * tcoefs(n,:)
+  end do
 
-!   tcoefs(1,:) = this%rec_eval(p,point,coefs,n_terms,n_var,var_idx)
-  
-!   ! evaluate derivatives at neighboring cell centroid
-!   do nd = 2,this%b(blk)%p%total_degree
-!     do nt = p%idx(nd-1)+1,p%idx(nd)
-!       call p%deval( nt, this%transform(p%n_dim,point), p%exponents(:,nt), dB, dcoef, coef )
-!       call p%eval(nt,nbor%h_ref/this%h_ref,scale,coef)
-!       tcoefs(nt,:) = coefs(nt,:)*dB*scale
-!     end do
-!   end do
-! end function shift_coefs_to_other_cell
+  rat = nbor%h_ref/this%h_ref
+  ! dB = dB * real( dcoef, dp ) / product( this%h_ref ** order(1:p%n_dim) )
+end function shift_coefs_from_nbor
 
 pure function evaluate_reconstruction( this, p, point, coefs, n_terms, n_var, var_idx ) result(val)
     use set_constants, only : zero
@@ -5966,7 +5877,7 @@ pure function evaluate_reconstruction( this, p, point, coefs, n_terms, n_var, va
     integer :: v, n
     val = zero
     do n = 1,n_terms
-      basis(n) = this%eval(p,n,point)
+      basis(n) = this%eval_b(p,n,point)
     end do
     do v = 1,n_var
       val(v) = val(v) + dot_product( coefs(1:n_terms,var_idx(v)), basis )
@@ -5989,7 +5900,7 @@ pure function evaluate_reconstruction( this, p, point, coefs, n_terms, n_var, va
     scale = one
     val = zero
     do n = 1,n_terms
-      basis(n) = this%deval(p,n,point,order)
+      basis(n) = this%deval_b(p,n,point,order)
     end do
     do v = 1,n_var
       val(v) = val(v) + dot_product( coefs(1:n_terms,var_idx(v)), basis )
@@ -6135,8 +6046,8 @@ module reconstruct_cell_derived_type
   contains
     private
     procedure, public, pass :: destroy => destroy_cell_rec
-    procedure, public, pass :: eval    => evaluate_reconstruction
-    procedure, public, pass :: deval   => evaluate_reconstruction_derivative
+    procedure, public, pass :: eval_c    => evaluate_reconstruction
+    procedure, public, pass :: deval_c   => evaluate_reconstruction_derivative
     procedure, public, pass :: set_cell_avg => set_cell_avg_func, set_cell_avg_val
     procedure, public, pass :: set_cell_coefs, get_cell_error
     procedure, public, pass :: get_sector_stencil_idx
@@ -6250,7 +6161,7 @@ contains
     val = zero
 
     do n = 1,n_terms
-      local_basis(n) = this%basis%eval(p,n,point)
+      local_basis(n) = this%basis%eval_b(p,n,point)
     end do
 
     if ( present(lim) ) then
@@ -6291,7 +6202,7 @@ contains
     val = zero
 
     do n = 1,n_terms
-      local_basis(n) = this%basis%deval(p,n,point,order)
+      local_basis(n) = this%basis%deval_b(p,n,point,order)
     end do
 
     if (order(1)==6) then
@@ -6392,7 +6303,7 @@ contains
     tmp_val = zero
     do n = 1,quad%n_quad
       exact = eval_fun%test_eval( p%n_dim, n_var, quad%quad_pts(:,n) )
-      reconstructed = this%eval( p, quad%quad_pts(:,n), n_terms, n_var, var_idx )
+      reconstructed = this%eval_c( p, quad%quad_pts(:,n), n_terms, n_var, var_idx )
       tmp_val(:,n) = abs( reconstructed - exact )
     end do
     if (norm>max_L_norm) then
@@ -6604,7 +6515,7 @@ module rec_block_derived_type
     procedure, public, pass :: destroy => destroy_rec_block
     procedure, public, pass :: solve   => solve_block
     procedure, public, pass :: get_nbors
-    procedure, public, pass :: eval => evaluate_block_rec
+    procedure, public, pass :: eval_rb => evaluate_block_rec
     procedure, public, pass :: set_cell_avgs => set_cell_avgs_fun
     procedure,         pass :: get_cell_h_ref
     procedure,         pass :: init_cell, solve_cell
@@ -6718,9 +6629,9 @@ contains
     if ( present(n_terms) ) n_terms_ = max(min(n_terms_,n_terms),1)
 
     if ( present(order) ) then
-      val = this%cells(lin_idx)%deval( this%p, x, n_terms_, n_vars, vars, order, lim=lim )
+      val = this%cells(lin_idx)%deval_c( this%p, x, n_terms_, n_vars, vars, order, lim=lim )
     else
-      val = this%cells(lin_idx)%eval( this%p, x, n_terms_, n_vars, vars, lim=lim )
+      val = this%cells(lin_idx)%eval_c( this%p, x, n_terms_, n_vars, vars, lim=lim )
     end if
   end function evaluate_block_rec
 
@@ -6786,7 +6697,7 @@ contains
     tmp_val = zero
     do n = 1,quad%n_quad
       exact = eval_fun%test_eval( this%p%n_dim, n_var, quad%quad_pts(:,n) )
-      reconstructed = this%cells(lin_idx)%eval( this%p, quad%quad_pts(:,n),    &
+      reconstructed = this%cells(lin_idx)%eval_c( this%p, quad%quad_pts(:,n),    &
                                                 n_terms, n_var, var_idx, lim=lim )
       tmp_val(:,n) = abs( reconstructed - exact )
     end do
@@ -6820,7 +6731,7 @@ contains
     tmp_val = zero
     do n = 1,quad%n_quad
       exact = eval_fun%dx_eval( quad%quad_pts(:,n), order=order)
-      reconstructed = this%cells(lin_idx)%deval( this%p, quad%quad_pts(:,n),    &
+      reconstructed = this%cells(lin_idx)%deval_c( this%p, quad%quad_pts(:,n),    &
                                                 n_terms, n_var, var_idx, order, lim=lim )
       tmp_val(:,n) = abs( reconstructed - exact )
     end do
@@ -7085,6 +6996,25 @@ contains
     end do
   end subroutine get_cell_RHS_sec
 
+  pure subroutine compare_reconstructions(this,lin_idx,term_end,n_var,var_idx)
+    class(rec_block_t),     intent(in) :: this
+    integer,                intent(in) :: lin_idx, term_end, n_var
+    integer, dimension(:),  intent(in) :: var_idx
+    real(dp), dimension(term_end,n_var) :: tcoefs1, tcoefs2
+    integer :: i, j, k, n_nbors, tmp_var
+    i = lin_idx
+
+    tcoefs1 = this%cells(i)%basis%transform_coefs(this%p,this%cells(i)%coefs,term_end,n_var,var_idx)
+    ! tcoefs1 = this%cells(i)%coefs
+    n_nbors = this%cells(i)%n_nbor
+    do k = 1,n_nbors
+      j = this%cells(i)%nbor_idx(k)
+      tcoefs2 = this%cells(i)%basis%shift_coefs_from_nbor( this%cells(j)%basis,this%p,this%cells(j)%coefs,term_end,n_var,var_idx)
+      tmp_var = 1
+    end do
+  end subroutine compare_reconstructions
+
+
   pure subroutine solve_cell( this, lin_idx, term_end, n_var, var_idx )
     use set_constants, only : zero
     use project_inputs, only : column_scaling, use_cweno
@@ -7154,6 +7084,10 @@ contains
     do i = 1,this%n_cells_total
       call this%solve_cell( i, term_end, n_var, var_idx )
     end do
+    do i = 1,this%n_cells_total
+      call compare_reconstructions(this,i,term_end,n_var,var_idx)
+    end do
+    
   end subroutine solve_block
 
 end module rec_block_derived_type
@@ -7376,7 +7310,7 @@ module rec_derived_type
     private
     procedure, public, pass :: destroy => destroy_rec_t
     procedure, public, pass :: solve   => solve_rec
-    procedure, public, pass :: eval    => evaluate_reconstruction
+    procedure, public, pass :: eval_rb    => evaluate_reconstruction
     procedure, public, pass :: get_block_error_norms, get_block_derivative_error_norms
   end type rec_t
 
@@ -7462,9 +7396,9 @@ contains
 
     n_vars = size(vars)
     if ( present(n_terms) ) then
-      val = this%b(blk)%eval(cell_idx, x, vars, n_terms=n_terms )
+      val = this%b(blk)%eval_rb(cell_idx, x, vars, n_terms=n_terms )
     else
-      val = this%b(blk)%eval(cell_idx, x, vars )
+      val = this%b(blk)%eval_rb(cell_idx, x, vars )
     end if
   end function evaluate_reconstruction
 
@@ -7954,7 +7888,7 @@ contains
     do q = 1,phys_quad%n_quad
       x = phys_quad%quad_pts(1:n_dim,q)
       NODE_DATA( 1:n_dim, q ) = x
-      tmp_var(:,1) = rec%eval( cell_idx, x, [(i,i=1,rec%n_vars)],              &
+      tmp_var(:,1) = rec%eval_rb( cell_idx, x, [(i,i=1,rec%n_vars)],              &
                                n_terms=n_terms_, lim=lim )
       if ( opt(2) .or. opt(3) ) then
         tmp_var(:,2) = ext_fun%eval(x)
@@ -7972,7 +7906,7 @@ contains
         do i = 1,rec%n_vars
           do n = 2,n_terms_
             cnt = cnt + 1
-            tmp_var(1:1,1) = rec%eval( cell_idx, x, [i],              &
+            tmp_var(1:1,1) = rec%eval_rb( cell_idx, x, [i],              &
                                n_terms=n_terms_, order=rec%p%exponents(:,n), lim=lim )
             NODE_DATA(cnt,q) = tmp_var(1,1)
           end do
@@ -7991,7 +7925,7 @@ contains
         do i = 1,rec%n_vars
           do n = 2,n_terms_
             cnt = cnt + 1
-            tmp_var(1:1,1) = rec%eval( cell_idx, x, [i],              &
+            tmp_var(1:1,1) = rec%eval_rb( cell_idx, x, [i],              &
                                n_terms=n_terms_, order=rec%p%exponents(:,n), lim=lim ) &
                                - ext_fun%dx_eval(x,order=rec%p%exponents(:,n))
             NODE_DATA(cnt,q) = tmp_var(1,1)
