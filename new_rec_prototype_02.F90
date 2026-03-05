@@ -5844,18 +5844,15 @@ pure function shift_coefs_from_nbor(this,nbor,p,nbor_coefs,n_terms,n_var,var_idx
   integer,                    intent(in) :: n_terms, n_var
   integer,  dimension(n_var), intent(in) :: var_idx
   real(dp), dimension(n_terms,n_var)     :: tcoefs
-  integer :: n, m
+  integer :: n
   integer :: dc,fact_coef
   real(dp) :: scale
-  real(dp), dimension(p%n_dim) :: point, rat
+  real(dp), dimension(p%n_dim) :: point
   integer, dimension(p%n_dim) :: order
-
-
   ! evaluate nbor reconstruction at cell centroid
   point = this%x_ref
   tcoefs(1,:) = nbor%rec_eval(p,point,nbor_coefs,n_terms,n_var,var_idx)
   do n = 2,n_terms
-    ! call p%eval_m(n,this%h_ref/nbor%h_ref,scale,fact_coef)
     call p%eval_m(n,this%h_ref,scale,fact_coef)
     scale = scale / real(fact_coef,dp)
     order = p%exponents(:,n)
@@ -5863,8 +5860,6 @@ pure function shift_coefs_from_nbor(this,nbor,p,nbor_coefs,n_terms,n_var,var_idx
     tcoefs(n,:) = scale * tcoefs(n,:)
     tcoefs(1,:) = tcoefs(1,:) + tcoefs(n,:) * this%moments(n)
   end do
-  rat = nbor%h_ref/this%h_ref
-  ! dB = dB * real( dcoef, dp ) / product( this%h_ref ** order(1:p%n_dim) )
 end function shift_coefs_from_nbor
 
 pure function evaluate_reconstruction( this, p, point, coefs, n_terms, n_var, var_idx ) result(val)
@@ -6055,11 +6050,8 @@ module reconstruct_cell_derived_type
     procedure, public, pass :: set_cell_coefs, get_cell_error
     procedure, public, pass :: get_sector_stencil_idx
     procedure, public, pass :: get_nonlinear_weights, get_nonlinear_weights_z, cweno
+    procedure, public, pass :: get_self_osc_indicator, get_nbor_osc_indicator
   end type rec_cell_t
-
-  ! type :: lin_rec_t
-  !   type
-  ! end type lin_rec_t
 
   interface rec_cell_t
     module procedure constructor
@@ -6450,13 +6442,14 @@ contains
 
     do v = 1,n_var
       ! tau = abs( real(n_sec,dp) * osc(0,v) - sum(osc(1:,v)) )
-      ! do s = 0,n_sec
-      !   weights(s,v) = lambda(s) * ( one + ( tau/( osc(s,v) + epsilon_cweno) )**r_cweno )
-      ! end do
-      tau = ( sum( abs( osc(0,v) - osc(1:,v) ) )/real(n_sec,dp) )**r_cweno
+      tau = sum( abs( osc(0,v) - osc(1:,v) ) )/real(n_sec,dp)
       do s = 0,n_sec
-        weights(s,v) = lambda(s) * ( one + tau/( osc(s,v) + epsilon_cweno) )
+        weights(s,v) = lambda(s) * ( one + ( tau/( osc(s,v) + epsilon_cweno) )**r_cweno )
       end do
+      ! tau = ( sum( abs( osc(0,v) - osc(1:,v) ) )/real(n_sec,dp) )**r_cweno
+      ! do s = 0,n_sec
+      !   weights(s,v) = lambda(s) * ( one + tau/( osc(s,v) + epsilon_cweno) )
+      ! end do
       weights(:,v) = weights(:,v)/sum( weights(:,v) )
     end do
 
@@ -6472,6 +6465,40 @@ contains
     end if
 
   end subroutine get_nonlinear_weights_z
+
+  pure function get_nbor_osc_indicator(this,nbor,p,term_start,term_end,n_var,var_idx) result(osc)
+    use set_constants, only : zero, one
+    use monomial_basis_derived_type,  only : monomial_basis_t
+    class(rec_cell_t),                            intent(in)  :: this, nbor
+    type(monomial_basis_t),                       intent(in)  :: p
+    integer,                                      intent(in)  :: term_start
+    integer,                                      intent(in)  :: term_end
+    integer,                                      intent(in)  :: n_var
+    integer,  dimension(:),                       intent(in)  :: var_idx
+    real(dp), dimension(n_var)                                :: osc
+    real(dp), dimension(term_end,n_var) :: nbor_coefs
+    integer :: v
+    nbor_coefs = this%basis%shift_coefs_from_nbor(nbor%basis,p,nbor%coefs,term_end,n_var,var_idx)
+    do v = 1,n_var
+      osc(v) = sum( nbor_coefs(2:,v)**2 )
+    end do
+  end function get_nbor_osc_indicator
+
+  pure function get_self_osc_indicator(this,p,term_start,term_end,n_var,var_idx) result(osc)
+    use set_constants, only : zero, one
+    use monomial_basis_derived_type,  only : monomial_basis_t
+    class(rec_cell_t),                            intent(in)  :: this
+    type(monomial_basis_t),                       intent(in)  :: p
+    integer,                                      intent(in)  :: term_start
+    integer,                                      intent(in)  :: term_end
+    integer,                                      intent(in)  :: n_var
+    integer,  dimension(:),                       intent(in)  :: var_idx
+    real(dp), dimension(n_var)                                :: osc
+    integer :: v
+    do v = 1,n_var
+      osc(v) = sum( this%coefs(2:,var_idx(v))**2 )
+    end do
+  end function get_self_osc_indicator
 
   pure subroutine cweno(this,p)
     use set_constants, only : zero, one
@@ -6494,7 +6521,7 @@ contains
       call this%get_nonlinear_weights(p,term_start,term_end,n_var,var_idx,weights,coefs_out=coefs_out)
     end if
     this%coefs = coefs_out
-  end subroutine cweno  
+  end subroutine cweno
   
 end module reconstruct_cell_derived_type
 
@@ -7012,8 +7039,6 @@ contains
     real(dp), dimension(term_end,n_var) :: tcoefs1, tcoefs2
     integer :: i, j, k, n_nbors, tmp_var
     i = lin_idx
-
-    ! tcoefs1 = this%cells(i)%basis%transform_coefs(this%p,this%cells(i)%coefs,term_end,n_var,var_idx)
     tcoefs1 = this%cells(i)%coefs
     n_nbors = this%cells(i)%n_nbor
     do k = 1,n_nbors
@@ -7022,7 +7047,6 @@ contains
       tmp_var = 1
     end do
   end subroutine compare_reconstructions
-
 
   pure subroutine solve_cell( this, lin_idx, term_end, n_var, var_idx )
     use set_constants, only : zero
