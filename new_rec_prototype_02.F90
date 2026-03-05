@@ -38,8 +38,8 @@ module project_inputs
   private
   public :: allocate_inputs, deallocate_inputs
   public :: job_name, verbose_level
-  public :: n_dim, rec_degree, n_rec_vars, n_nodes, n_ghost, n_skip, old, limit
-  public :: column_scaling
+  public :: n_dim, rec_degree, n_rec_vars, n_nodes, n_ghost, n_skip, limit
+  public :: column_scaling, local_scaling
   public :: use_cweno, epsilon_cweno, r_cweno, lambda_0_cweno, use_cwenoz
   public :: geom_space_r, grid_perturb
   public :: out_quad_order, out_derivatives
@@ -56,9 +56,9 @@ module project_inputs
   integer, dimension(3) :: n_nodes       = [9,1,1]
   integer, dimension(3) :: n_ghost       = [0,0,0]
   integer, dimension(3) :: n_skip        = [1,1,1]
-  logical  :: old           = .false.
   logical  :: limit         = .false.
   logical  :: column_scaling   = .true.
+  logical  :: local_scaling    = .true.
   logical  :: use_cweno        = .false.
   logical  :: use_cwenoz       = .false.
   real(dp) :: epsilon_cweno    = 1.0e-14_dp
@@ -334,8 +334,8 @@ end module namelist_helper
 module nml_project
   use namelist_helper, only : nml_warnings
   use project_inputs, only : job_name, verbose_level, n_dim, rec_degree,       &
-                             n_rec_vars, n_nodes, n_ghost, n_skip, old, limit, &
-                             column_scaling,                                   &
+                             n_rec_vars, n_nodes, n_ghost, n_skip, limit,      &
+                             column_scaling, local_scaling,                    &
                              use_cweno, epsilon_cweno, r_cweno, lambda_0_cweno,&
                              use_cwenoz, grid_perturb, geom_space_r,           &
                              out_quad_order, out_derivatives
@@ -344,7 +344,8 @@ module nml_project
   public :: read_nml_project
   public :: write_nml_project
   namelist /project/ job_name, verbose_level, n_dim, n_rec_vars, rec_degree,   &
-                     n_nodes, n_ghost, n_skip, old, limit, column_scaling,     &
+                     n_nodes, n_ghost, n_skip, limit, column_scaling,          &
+                     local_scaling,                                            &
                      use_cweno, epsilon_cweno, r_cweno, lambda_0_cweno,        &
                      use_cwenoz, grid_perturb, geom_space_r,                   &
                      out_quad_order, out_derivatives
@@ -367,9 +368,9 @@ contains
     n_nodes       = [9,1,1]
     n_ghost       = [0,0,0]
     n_skip        = [1,1,1]
-    old           = .false.
     limit         = .false.
     column_scaling   = .true.
+    local_scaling    = .true.
     use_cweno        = .false.
     use_cwenoz       = .false.
     epsilon_cweno    = 1.0e-14_dp
@@ -5843,23 +5844,25 @@ pure function shift_coefs_from_nbor(this,nbor,p,nbor_coefs,n_terms,n_var,var_idx
   integer,                    intent(in) :: n_terms, n_var
   integer,  dimension(n_var), intent(in) :: var_idx
   real(dp), dimension(n_terms,n_var)     :: tcoefs
-  integer :: n
+  integer :: n, m
   integer :: dc,fact_coef
   real(dp) :: scale
   real(dp), dimension(p%n_dim) :: point, rat
   integer, dimension(p%n_dim) :: order
 
+
   ! evaluate nbor reconstruction at cell centroid
   point = this%x_ref
   tcoefs(1,:) = nbor%rec_eval(p,point,nbor_coefs,n_terms,n_var,var_idx)
   do n = 2,n_terms
-    call p%eval_m(n,this%h_ref/nbor%h_ref,scale,fact_coef)
+    ! call p%eval_m(n,this%h_ref/nbor%h_ref,scale,fact_coef)
+    call p%eval_m(n,this%h_ref,scale,fact_coef)
     scale = scale / real(fact_coef,dp)
     order = p%exponents(:,n)
     tcoefs(n,:) = nbor%drec_eval(p,point,nbor_coefs,n_terms,n_var,var_idx,order)
     tcoefs(n,:) = scale * tcoefs(n,:)
+    tcoefs(1,:) = tcoefs(1,:) + tcoefs(n,:) * this%moments(n)
   end do
-
   rat = nbor%h_ref/this%h_ref
   ! dB = dB * real( dcoef, dp ) / product( this%h_ref ** order(1:p%n_dim) )
 end function shift_coefs_from_nbor
@@ -6657,8 +6660,10 @@ contains
   end subroutine set_cell_avgs_fun
 
   pure function get_cell_h_ref( this, gblock, idx ) result(h_ref)
+    use set_constants,     only : one
     use math,              only : maximal_extents
     use grid_derived_type, only : grid_block, pack_cell_node_coords
+    use project_inputs,    only : local_scaling
     class(rec_block_t),    intent(in) :: this
     type(grid_block),      intent(in) :: gblock
     integer, dimension(3), intent(in) :: idx
@@ -6667,14 +6672,18 @@ contains
     integer :: n_cell_nodes
     real(dp), dimension(:,:), allocatable :: nodes
     
-    n_cell_nodes = product(this%n_skip+1)
+    if ( local_scaling ) then
+      n_cell_nodes = product(this%n_skip+1)
 
-    allocate( nodes(3,n_cell_nodes) )
-    lo = [1,1,1]
-    hi = gblock%n_nodes
-    nodes = pack_cell_node_coords( idx, lo, hi, this%n_skip, gblock%node_coords )
-    h_ref = maximal_extents( this%n_dim, n_cell_nodes, nodes(1:this%n_dim,:) )
-    deallocate( nodes )
+      allocate( nodes(3,n_cell_nodes) )
+      lo = [1,1,1]
+      hi = gblock%n_nodes
+      nodes = pack_cell_node_coords( idx, lo, hi, this%n_skip, gblock%node_coords )
+      h_ref = maximal_extents( this%n_dim, n_cell_nodes, nodes(1:this%n_dim,:) )
+      deallocate( nodes )
+    else
+      h_ref = one
+    end if
   end function get_cell_h_ref
 
   pure function get_cell_error( this, quad, lin_idx, n_terms, norm,            &
@@ -7004,8 +7013,8 @@ contains
     integer :: i, j, k, n_nbors, tmp_var
     i = lin_idx
 
-    tcoefs1 = this%cells(i)%basis%transform_coefs(this%p,this%cells(i)%coefs,term_end,n_var,var_idx)
-    ! tcoefs1 = this%cells(i)%coefs
+    ! tcoefs1 = this%cells(i)%basis%transform_coefs(this%p,this%cells(i)%coefs,term_end,n_var,var_idx)
+    tcoefs1 = this%cells(i)%coefs
     n_nbors = this%cells(i)%n_nbor
     do k = 1,n_nbors
       j = this%cells(i)%nbor_idx(k)
