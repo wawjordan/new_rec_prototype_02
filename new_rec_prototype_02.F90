@@ -6036,6 +6036,7 @@ module reconstruct_cell_derived_type
     real(dp), dimension(:,:,:), allocatable :: Ainv_sec
     real(dp), dimension(:,:),   allocatable :: col_scale_sec
     real(dp), dimension(:,:,:), allocatable :: coefs_sec
+    real(dp), dimension(:,:),   allocatable :: LHS, M, M1
     integer :: n_vars
     integer :: self_idx
     integer :: self_block
@@ -6072,6 +6073,9 @@ contains
     if ( allocated(this%coefs_sec      ) ) deallocate( this%coefs_sec      )
     if ( allocated(this%Ainv_sec       ) ) deallocate( this%Ainv_sec       )
     if ( allocated(this%col_scale_sec  ) ) deallocate( this%col_scale_sec  )
+    if ( allocated(this%LHS  ) ) deallocate( this%LHS  )
+    if ( allocated(this%M1  ) ) deallocate( this%M1  )
+    if ( allocated(this%M  ) ) deallocate( this%M  )
     this%n_vars     = 0
     this%self_idx   = 0
     this%self_block = 0
@@ -6108,7 +6112,14 @@ contains
     allocate( this%coefs( p%n_terms, n_vars ) )
     allocate( this%Ainv(  p%n_terms-1, n_nbor ) )
     allocate( this%col_scale( p%n_terms-1     ) )
-    
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    allocate( this%LHS(  n_nbor, p%n_terms-1 ) )
+    allocate( this%M1( n_nbor, n_nbor ) )
+    allocate( this%M( 2*p%n_dim - n_bnd, 2*p%n_dim - n_bnd) )
+    this%LHS = zero
+    this%M1  = zero
+    this%M   = zero
+
     this%nbor_block  = nbor_block(1:n_nbor)
     this%nbor_idx    = nbor_idx(1:n_nbor)
     this%nbor_degree = nbor_degree(1:n_nbor)
@@ -6787,6 +6798,7 @@ contains
     integer,                  intent(in)    :: lin_idx
     integer,                  intent(in)    :: term_end
     integer :: i, j, n, m
+    integer :: k, n_nnbor
     i = lin_idx
     m = this%cells(i)%n_nbor
     n = this%p%n_terms
@@ -6797,6 +6809,22 @@ contains
     end if
     
     call compute_pseudo_inverse( m, n, LHS(1:m,1:n), this%cells(i)%Ainv(1:n,1:m) )
+
+    this%cells(i)%LHS = LHS(1:m,1:n)
+    do j = 1,this%cells(i)%n_nbor
+      do k = 1,this%cells(i)%n_nbor
+        this%cells(i)%M1(j,k)  = -dot_product( this%cells(i)%LHS(j,:), this%cells(i)%col_scale * this%cells(i)%Ainv(:,k) )
+      end do
+      this%cells(i)%M1(j,j)  = this%cells(i)%M1(j,j) + 1
+    end do
+
+    n_nnbor = 2*this%n_dim-this%cells(i)%n_bnd
+    do j = 1,n_nnbor
+      do k = 1,n_nnbor
+        this%cells(i)%M(j,k) = -dot_product( this%cells(i)%LHS(j,:), this%cells(i)%col_scale * this%cells(i)%Ainv(:,k) )
+      end do
+      this%cells(i)%M(j,j)  = this%cells(i)%M(j,j) + 1
+    end do
 
 
     if ( use_cweno ) then
@@ -6957,7 +6985,7 @@ contains
     do k = 1,LHS_m
       j = this%cells(i)%get_sector_stencil_idx(s,k)
       shifted_moments = this%cells(i)%basis%shift_moments( this%p, this%cells( this%cells(i)%nbor_idx(j) )%basis )
-      LHS(k,1:LHS_n) = shifted_moments(2:term_end) - this%cells(i)%basis%moments(2:term_end)
+      LHS(k,1:LHS_n) = shifted_moments(2:term_end)
     end do
 
     if ( present(col_scale) ) then
@@ -7056,8 +7084,8 @@ contains
     class(rec_block_t), intent(inout) :: this
     integer,                intent(in)    :: lin_idx, term_end, n_var
     integer, dimension(:),  intent(in)    :: var_idx
-    real(dp), dimension(:,:), allocatable :: RHS
-    integer :: i, n, n_nbors, v, s
+    real(dp), dimension(:,:), allocatable :: RHS, nbor_delta0, nbor_delta1, nbor_delta2
+    integer :: i, n, n_nbors, v, s, n_nnbor, j, k
     integer, dimension(3) :: idx
     i = lin_idx
     allocate( RHS(this%cells(i)%n_nbor,n_var) )
@@ -7075,6 +7103,19 @@ contains
         end do
       end do
     end if
+
+    n_nnbor = 2*this%n_dim-1
+
+    allocate( nbor_delta0(this%cells(i)%n_nbor,n_var) )
+    allocate( nbor_delta1(this%cells(i)%n_nbor,n_var) )
+    allocate( nbor_delta2(this%cells(i)%n_nbor,n_var) )
+    ! allocate( nbor_delta2(n_nnbor,n_var) )
+
+    call get_nbor_delta_quad(this,lin_idx,term_end,n_var,var_idx,nbor_delta0)
+    do v = 1,n_var
+      nbor_delta1(:,v) = RHS(:,v) - matmul( this%cells(i)%LHS, this%cells(i)%coefs(2:,var_idx(v)) )
+      nbor_delta2(:,v) = matmul( this%cells(i)%M1, RHS(:,v) )
+    end do
     
 
     ! if (use_cweno) then
@@ -7106,7 +7147,38 @@ contains
     end if
 
     deallocate( RHS )
+
+    deallocate( nbor_delta0, nbor_delta1, nbor_delta2)
   end subroutine solve_cell
+
+  pure subroutine get_nbor_delta_quad(this,lin_idx,term_end,n_var,var_idx,nbor_delta)
+    use set_constants, only : zero
+    use project_inputs, only : column_scaling, use_cweno
+    use grid_local,     only : grid
+    use index_conversion, only : global2local
+    class(rec_block_t), intent(inout) :: this
+    integer,                intent(in)    :: lin_idx, term_end, n_var
+    integer, dimension(:),  intent(in)    :: var_idx
+    real(dp), dimension(this%cells(lin_idx)%n_nbor,n_var), intent(out) :: nbor_delta
+    real(dp), dimension(:,:), allocatable :: quad_array
+    integer, dimension(3) :: idx
+    integer :: i, j, k, q
+    i = lin_idx
+    do k = 1,this%cells(i)%n_nbor
+      j = this%cells(i)%nbor_idx(k)
+      idx = 1
+      idx(1:this%n_dim) = global2local(j,this%n_cells)
+      associate( quad => grid%gblock(1)%grid_vars%quad(idx(1),idx(2),idx(3)) )
+        allocate( quad_array(n_var,quad%n_quad) )
+        do q = 1, quad%n_quad
+          quad_array(:,q) = this%cells(i)%eval_c(this%p,quad%quad_pts(:,q),term_end,n_var,var_idx)
+        end do
+        nbor_delta(k,:) = quad%integrate(n_var,quad_array) / sum(quad%quad_wts )
+        nbor_delta(k,:) = nbor_delta(k,:) - this%cells(j)%coefs(1,:)
+        deallocate( quad_array)
+      end associate
+    end do
+  end subroutine get_nbor_delta_quad
 
   pure subroutine solve_block( this, term_end, n_var, var_idx )
     use set_constants, only : zero
