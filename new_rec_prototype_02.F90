@@ -2396,6 +2396,7 @@ contains
     real(dp) :: abs_tolerance
     real(dp) :: rel_tolerance
 
+    real(dp), dimension(LHS_m,LHS_n)      :: LHS_cpy
     real(dp), dimension(:),   allocatable :: S
     real(dp), dimension(:,:), allocatable :: U
     real(dp), dimension(:,:), allocatable :: VT
@@ -2407,6 +2408,8 @@ contains
 
     ! Setup
     LHS_plus = zero
+
+    LHS_cpy = LHS
 
     ! Define SVD Parameters
     LDA   = LHS_m
@@ -2429,7 +2432,7 @@ contains
     ! Compute the Singular Value Decomposition of the Reconstruction LHS
     ! Note: dgesvd = LAPACK routine
     ! Note: dgesdd makes assumptions about floating point arithmetic.
-    call dgesvd( 'A', 'A', LHS_m, LHS_n, LHS, LDA, S, U, LDU, VT, LDVT,        &
+    call dgesvd( 'A', 'A', LHS_m, LHS_n, LHS_cpy, LDA, S, U, LDU, VT, LDVT,        &
                  WORK, LWORK, INFO )
     !call sgesvd( 'A', 'A', LHS_m, LHS_n, LHS, LDA, S, U, LDU, VT, LDVT,        &
     !             WORK, LWORK, INFO )
@@ -6808,9 +6811,11 @@ contains
       call this%get_cell_LHS( i, term_end, m, n, LHS )
     end if
     
+    this%cells(i)%LHS = LHS(1:m,1:n)
+
     call compute_pseudo_inverse( m, n, LHS(1:m,1:n), this%cells(i)%Ainv(1:n,1:m) )
 
-    this%cells(i)%LHS = LHS(1:m,1:n)
+    
     do j = 1,this%cells(i)%n_nbor
       do k = 1,this%cells(i)%n_nbor
         this%cells(i)%M1(j,k)  = -dot_product( this%cells(i)%LHS(j,:), this%cells(i)%col_scale * this%cells(i)%Ainv(:,k) )
@@ -7077,14 +7082,15 @@ contains
   end subroutine compare_reconstructions
 
   pure subroutine solve_cell( this, lin_idx, term_end, n_var, var_idx )
-    use set_constants, only : zero
+    use set_constants, only : zero, near_zero
     use project_inputs, only : column_scaling, use_cweno
     use grid_local,     only : grid
     use index_conversion, only : global2local
     class(rec_block_t), intent(inout) :: this
     integer,                intent(in)    :: lin_idx, term_end, n_var
     integer, dimension(:),  intent(in)    :: var_idx
-    real(dp), dimension(:,:), allocatable :: RHS, nbor_delta0, nbor_delta1, nbor_delta2
+    real(dp), dimension(:,:), allocatable :: RHS, nbor_avg, nbor_delta0, nbor_delta1, nbor_delta2
+    real(dp), dimension(n_var) :: T1, T2
     integer :: i, n, n_nbors, v, s, n_nnbor, j, k
     integer, dimension(3) :: idx
     i = lin_idx
@@ -7104,26 +7110,37 @@ contains
       end do
     end if
 
-    n_nnbor = 2*this%n_dim-1
+    n_nnbor = 2*this%n_dim - this%cells(i)%n_bnd
 
+    allocate( nbor_avg(   this%cells(i)%n_nbor,n_var) )
     allocate( nbor_delta0(this%cells(i)%n_nbor,n_var) )
     allocate( nbor_delta1(this%cells(i)%n_nbor,n_var) )
-    allocate( nbor_delta2(this%cells(i)%n_nbor,n_var) )
-    ! allocate( nbor_delta2(n_nnbor,n_var) )
+    allocate( nbor_delta2(             n_nnbor,n_var) )
+    
+
+    do v = 1,n_var
+      nbor_avg(:,v) = RHS(:,v) + this%cells(i)%coefs( 1, var_idx(v) )
+    end do
 
     call get_nbor_delta_quad(this,lin_idx,term_end,n_var,var_idx,nbor_delta0)
     do v = 1,n_var
-      nbor_delta1(:,v) = RHS(:,v) - matmul( this%cells(i)%LHS, this%cells(i)%coefs(2:,var_idx(v)) )
-      nbor_delta2(:,v) = matmul( this%cells(i)%M1, RHS(:,v) )
+      nbor_delta1(:,v) = matmul( this%cells(i)%LHS,  this%cells(i)%coefs(2:,var_idx(v)) / this%cells(i)%col_scale ) + this%cells(i)%coefs( 1, var_idx(v) )
+      nbor_delta1(:,v) = nbor_delta1(:,v) - nbor_avg(:,v)
+      nbor_delta2(:,v) = matmul( this%cells(i)%LHS(1:n_nnbor,:), this%cells(i)%coefs(2:,var_idx(v)) / this%cells(i)%col_scale ) + this%cells(i)%coefs( 1, var_idx(v) )
+      nbor_delta2(:,v) = nbor_delta2(:,v) - nbor_avg(1:n_nnbor,v)
+      T1(v) = sum(abs(nbor_delta0(1:n_nnbor,v))) / ( maxval( abs( RHS(1:n_nnbor,v) + this%cells(i)%coefs( 1, var_idx(v) ) ) ) + near_zero )
+      ! T2(v) = sum(abs(nbor_delta1(1:n_nnbor,v))) / ( maxval( abs( RHS(1:n_nnbor,v) + this%cells(i)%coefs( 1, var_idx(v) ) ) ) + near_zero )
+      T2(v) = sum(abs(nbor_delta1(:,v))) / ( maxval( abs( RHS(:,v) + this%cells(i)%coefs( 1, var_idx(v) ) ) ) + near_zero )
     end do
     
+
 
     ! if (use_cweno) then
     !   idx = 1
     !   idx(1:this%n_dim) = global2local(i,this%n_cells)
     !   call this%cells(i)%get_nonlinear_weights_alt(this%p,grid%gblock(1)%grid_vars%quad(idx(1),idx(2),idx(3)))
     ! end if
-    if (use_cweno) then
+    if (use_cweno .and. any(T1>0.0015_dp*2.0_dp**(this%n_dim - 1)) ) then
       if ( column_scaling ) then
         do s = 1,this%cells(i)%sec_idx(1)
           call this%get_cell_RHS_sec(i,s,n_var,var_idx,n_nbors,RHS)
@@ -7148,7 +7165,7 @@ contains
 
     deallocate( RHS )
 
-    deallocate( nbor_delta0, nbor_delta1, nbor_delta2)
+    deallocate( nbor_avg, nbor_delta0, nbor_delta1, nbor_delta2 )
   end subroutine solve_cell
 
   pure subroutine get_nbor_delta_quad(this,lin_idx,term_end,n_var,var_idx,nbor_delta)
