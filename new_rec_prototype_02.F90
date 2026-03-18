@@ -6055,6 +6055,10 @@ module reconstruct_cell_derived_type
     procedure, public, pass :: get_sector_stencil_idx
     procedure, public, pass :: get_nonlinear_weights, get_nonlinear_weights_z, cweno
     procedure, public, pass :: get_self_osc_indicator, get_nbor_osc_indicator
+    procedure,         pass :: linear_weights, linear_weights2
+    procedure,         pass :: modify_coefs, get_oscillation_indicators
+    procedure, public, pass :: get_cweno_weights, get_cwenoz_weights, get_aicwenoz_weights
+    procedure, public, pass :: apply_cweno, get_mu
   end type rec_cell_t
 
   interface rec_cell_t
@@ -6340,36 +6344,174 @@ contains
     j = this%sec_idx( offset + n )
   end function get_sector_stencil_idx
 
-  pure subroutine linear_weights(this,lambda,lambda_0)
+  pure function linear_weights(this,lambda_0) result(lambda)
     use set_constants, only : one
     use project_inputs, only : lambda_0_cweno
-    class(rec_cell_t),                      intent(in) :: this
-    real(dp), dimension(0:this%sec_idx(1)), intent(out) :: lambda
-    real(dp), optional,                     intent(in)  :: lambda_0
+    class(rec_cell_t),         intent(in)  :: this    
+    real(dp), optional,        intent(in)  :: lambda_0
+    real(dp), dimension(0:this%sec_idx(1)) :: lambda
 
     lambda = one
     lambda(0) = lambda_0_cweno
     if (present(lambda_0)) lambda(0) = lambda_0
     lambda = lambda / sum(lambda)
-  end subroutine linear_weights
+end function linear_weights
 
-  pure subroutine linear_weights2(this,lambda,lambda_0)
+  pure function linear_weights2(this,lambda_0) result(lambda)
     use set_constants, only : one
     use project_inputs, only : lambda_0_cweno
-    class(rec_cell_t),                      intent(in) :: this
-    real(dp), dimension(0:this%sec_idx(1)), intent(out) :: lambda
-    real(dp), optional,                     intent(in)  :: lambda_0
+    class(rec_cell_t),          intent(in) :: this
+    real(dp), optional,         intent(in) :: lambda_0
+    real(dp), dimension(0:this%sec_idx(1)) :: lambda
 
     lambda = one
     lambda(0) = lambda_0_cweno
     if (present(lambda_0)) lambda(0) = lambda_0
     lambda(0)  = one - one/lambda(0)
     lambda(1:) = ( one - lambda(0) )/real(this%sec_idx(1),dp)
-  end subroutine linear_weights2
+  end function linear_weights2
+
+  pure function modify_coefs( this, p, lin_weights ) result(coefs_s0)
+    class(rec_cell_t),                            intent(in)  :: this
+    type(monomial_basis_t),                       intent(in)  :: p
+    real(dp), dimension(0:this%sec_idx(1)),       intent(in)  :: lin_weights
+    real(dp), dimension(p%n_terms-1,this%n_vars)              :: coefs_s0
+    integer :: lin_terms
+    integer :: v, s
+    lin_terms = p%idx(1) - 1
+    
+    do v = 1,this%n_vars
+      coefs_s0(:,v) = this%coefs(2:,v) / lin_weights(0)
+      do s = 1,this%sec_idx(1)
+          coefs_s0(1:lin_terms,v) = coefs_s0(1:lin_terms,v) - lin_weights(s)/lin_weights(0) * this%coefs_sec(:,v,s)
+      end do
+    end do
+  end function modify_coefs
+
+  pure function get_oscillation_indicators( this, p, coefs_s0 ) result(osc_ind)
+    class(rec_cell_t),                                 intent(in)  :: this
+    type(monomial_basis_t),                            intent(in)  :: p
+    real(dp), dimension(p%n_terms-1,this%n_vars),      intent(in)  :: coefs_s0
+    real(dp), dimension(0:this%sec_idx(1),this%n_vars)             :: osc_ind
+    integer :: v, s
+    do v = 1,this%n_vars
+      osc_ind(0,v) = sum(coefs_s0(:,v)**2)
+      do s = 1,this%sec_idx(1)
+        osc_ind(s,v) = sum(this%coefs_sec(:,v,s)**2)
+      end do
+    end do
+  end function get_oscillation_indicators
+
+  pure function get_cweno_weights( this, p ) result(weights)
+    use project_inputs, only : epsilon_cweno, r_cweno
+    class(rec_cell_t),                      intent(in) :: this
+    type(monomial_basis_t),                 intent(in) :: p
+    real(dp), dimension(0:this%sec_idx(1),this%n_vars) :: weights
+    real(dp), dimension(p%n_terms-1,this%n_vars)       :: coefs_s0
+    real(dp), dimension(0:this%sec_idx(1))             :: lin_weights
+    real(dp), dimension(0:this%sec_idx(1),this%n_vars) :: osc_ind
+    integer :: v, s
+    lin_weights = this%linear_weights2()
+    coefs_s0    = this%modify_coefs( p, lin_weights )
+    osc_ind     = this%get_oscillation_indicators( p, coefs_s0 )
+    do v = 1,this%n_vars
+      weights(:,v) = lin_weights / ( osc_ind(:,v) + epsilon_cweno )**r_cweno
+      weights(:,v) = weights(:,v) / sum( weights(:,v) )
+    end do
+  end function get_cweno_weights
+
+  pure function get_cwenoz_weights( this, p ) result(weights)
+    use set_constants, only : one
+    use project_inputs, only : epsilon_cweno, r_cweno
+    class(rec_cell_t),                      intent(in) :: this
+    type(monomial_basis_t),                 intent(in) :: p
+    real(dp), dimension(0:this%sec_idx(1),this%n_vars) :: weights
+    real(dp), dimension(p%n_terms-1,this%n_vars)       :: coefs_s0
+    real(dp), dimension(0:this%sec_idx(1))             :: lin_weights
+    real(dp), dimension(0:this%sec_idx(1),this%n_vars) :: osc_ind
+    real(dp) :: tau
+    integer :: v, s
+    lin_weights = this%linear_weights2()
+    coefs_s0    = this%modify_coefs( p, lin_weights )
+    osc_ind     = this%get_oscillation_indicators( p, coefs_s0 )
+    do v = 1,this%n_vars
+      tau = sum( abs( osc_ind(0,v) - osc_ind(1:,v) ) )/real(this%sec_idx(1),dp)
+      weights(:,v) = lin_weights * ( one + ( tau /( osc_ind(:,v) + epsilon_cweno) )**r_cweno )
+      weights(:,v) = weights(:,v) / sum( weights(:,v) )
+    end do
+  end function get_cwenoz_weights
+
+  pure function get_aicwenoz_weights( this, p, mu ) result(weights)
+    use set_constants, only : one
+    use project_inputs, only : epsilon_cweno, r_cweno
+    class(rec_cell_t),                      intent(in) :: this
+    type(monomial_basis_t),                 intent(in) :: p
+    real(dp), dimension(this%n_vars),       intent(in) :: mu
+    real(dp), dimension(0:this%sec_idx(1),this%n_vars) :: weights
+    
+    real(dp), dimension(p%n_terms-1,this%n_vars)       :: coefs_s0
+    real(dp), dimension(0:this%sec_idx(1))             :: lin_weights
+    real(dp), dimension(0:this%sec_idx(1),this%n_vars) :: osc_ind
+    real(dp) :: tau
+    integer :: v, s
+    lin_weights = this%linear_weights2()
+    coefs_s0    = this%modify_coefs( p, lin_weights )
+    osc_ind     = this%get_oscillation_indicators( p, coefs_s0 )
+    do v = 1,this%n_vars
+      tau = sum( abs( osc_ind(0,v) - osc_ind(1:,v) ) )/real(this%sec_idx(1),dp)
+      weights(:,v) = lin_weights * ( one + ( tau /( osc_ind(:,v) + epsilon_cweno*mu(v)**2 ) )**r_cweno )
+      weights(:,v) = weights(:,v) / sum( weights(:,v) )
+    end do
+  end function get_aicwenoz_weights
+
+  pure function get_mu(this,RHS) result(mu)
+    use set_constants, only : zero
+    class(rec_cell_t),                            intent(in) :: this
+    real(dp), dimension(this%n_nbor,this%n_vars), intent(in) :: RHS
+    real(dp), dimension(this%n_vars)                         :: mu
+    real(dp), parameter :: epsilon = 1.0e-40_dp
+    real(dp), dimension(this%n_nbor+1) :: vals
+    real(dp) :: avg
+    integer :: v, n_vals
+    n_vals = this%n_nbor+1
+    vals = zero
+    do v = 1,this%n_vars
+      vals     = this%coefs(1,v)
+      vals(2:) = vals(2:) + RHS(:,v)
+      avg = sum( vals ) / real(n_vals,dp)
+      mu(v)  = sum( abs(vals - avg )) / real(n_vals,dp) + epsilon
+    end do
+
+    !     pure function descaler(vals_) result(mu)
+  !       real(dp), dimension(:), intent(in) :: vals_
+  !       real(dp)                           :: mu
+  !       real(dp) :: avg
+  !       real(dp), parameter :: epsilon = 1.0e-40_dp
+  !       integer :: n_vals
+  !       n_vals = size(vals_)
+  !       avg = sum( vals_ ) / real(n_vals,dp)
+  !       mu  = sum( abs(vals_ - avg )) / real(n_vals,dp) + epsilon
+  !     end function descaler
+  end function get_mu
+
+  pure subroutine apply_cweno( this, p, weights )
+    class(rec_cell_t),                                  intent(inout)  :: this
+    type(monomial_basis_t),                             intent(in)  :: p
+    real(dp), dimension(0:this%sec_idx(1),this%n_vars), intent(in) :: weights
+    real(dp), dimension(p%n_terms-1,this%n_vars) :: coefs_s0
+    integer :: v, s
+    coefs_s0 = this%modify_coefs( p, this%linear_weights2() )
+    do v = 1,this%n_vars
+      this%coefs(2:,v) = weights(0,v) * coefs_s0(:,v)
+      do s = 1,this%sec_idx(1)
+        this%coefs(2:p%idx(1),v) = this%coefs(2:p%idx(1),v) + weights(s,v) * this%coefs_sec(:,v,s)
+      end do
+    end do
+  end subroutine apply_cweno
+    
 
   pure subroutine get_nonlinear_weights(this,p,term_start,term_end,n_var,var_idx,weights,coefs_out)
     use set_constants, only : zero, one
-    use monomial_basis_derived_type,  only : monomial_basis_t
     use project_inputs, only : epsilon_cweno, r_cweno
     class(rec_cell_t),                            intent(in)  :: this
     type(monomial_basis_t),                       intent(in)  :: p
@@ -6385,7 +6527,8 @@ contains
     integer :: n_sec, lin_terms
     integer :: v, s
 
-    call linear_weights(this,lambda)
+    ! call linear_weights(this,lambda)
+    lambda = this%linear_weights()
     n_sec     = this%sec_idx(1)
     lin_terms = p%idx(1)
     coefs_s  = zero
@@ -6437,7 +6580,8 @@ contains
     real(dp) :: tau
 
     ! call linear_weights(this,lambda)
-    call linear_weights2(this,lambda)
+    ! call linear_weights2(this,lambda)
+    lambda = this%linear_weights2()
     n_sec     = this%sec_idx(1)
     lin_terms = p%idx(1)
     coefs_s  = zero
@@ -6478,11 +6622,10 @@ contains
       end do
     end if
 
-  end subroutine get_nonlinear_weights_z
+  end subroutine get_nonlinear_weights_z  
 
   pure function get_nbor_osc_indicator(this,nbor,p,term_start,term_end,n_var,var_idx) result(osc)
     use set_constants, only : zero, one
-    use monomial_basis_derived_type,  only : monomial_basis_t
     class(rec_cell_t),                            intent(in)  :: this, nbor
     type(monomial_basis_t),                       intent(in)  :: p
     integer,                                      intent(in)  :: term_start
@@ -6500,7 +6643,6 @@ contains
 
   pure function get_self_osc_indicator(this,p,term_start,term_end,n_var,var_idx) result(osc)
     use set_constants, only : zero, one
-    use monomial_basis_derived_type,  only : monomial_basis_t
     class(rec_cell_t),                            intent(in)  :: this
     type(monomial_basis_t),                       intent(in)  :: p
     integer,                                      intent(in)  :: term_start
@@ -6514,12 +6656,13 @@ contains
     end do
   end function get_self_osc_indicator
 
-  pure subroutine cweno(this,p)
+  pure subroutine cweno(this,p,mu)
     use set_constants, only : zero, one
     use monomial_basis_derived_type,  only : monomial_basis_t
     use project_inputs,               only : use_cwenoz
     class(rec_cell_t),                            intent(inout)  :: this
     type(monomial_basis_t),                       intent(in)  :: p
+    real(dp), dimension(this%n_vars), optional, intent(in) :: mu
     real(dp), dimension(0:this%sec_idx(1),this%n_vars) ::weights
     real(dp), dimension(size(this%coefs,1),size(this%coefs,2)) :: coefs_out
     integer, dimension(this%n_vars) :: var_idx
@@ -6529,12 +6672,24 @@ contains
     term_end   = p%n_terms
     n_var      = this%n_vars
     var_idx    = [(i,i=1,n_var)]
+    ! if ( use_cwenoz ) then
+    !   call this%get_nonlinear_weights_z(p,term_start,term_end,n_var,var_idx,weights,coefs_out=coefs_out)
+    ! else
+    !   call this%get_nonlinear_weights(p,term_start,term_end,n_var,var_idx,weights,coefs_out=coefs_out)
+    ! end if
+    ! this%coefs = coefs_out
+
     if ( use_cwenoz ) then
-      call this%get_nonlinear_weights_z(p,term_start,term_end,n_var,var_idx,weights,coefs_out=coefs_out)
+      if ( present(mu) ) then
+        weights = this%get_aicwenoz_weights(p,mu)
+      else
+        weights = this%get_cwenoz_weights(p)
+      end if
     else
-      call this%get_nonlinear_weights(p,term_start,term_end,n_var,var_idx,weights,coefs_out=coefs_out)
+      weights = this%get_cwenoz_weights(p)
     end if
-    this%coefs = coefs_out
+    call this%apply_cweno(p,weights)
+
   end subroutine cweno
   
 end module reconstruct_cell_derived_type
@@ -7091,6 +7246,7 @@ contains
     integer, dimension(:),  intent(in)    :: var_idx
     real(dp), dimension(:,:), allocatable :: RHS, nbor_avg, nbor_delta0, nbor_delta1, nbor_delta2
     real(dp), dimension(n_var) :: T1, T2
+    real(dp), dimension(this%n_vars) :: mu
     integer :: i, n, n_nbors, v, s, n_nnbor, j, k
     integer, dimension(3) :: idx
     i = lin_idx
@@ -7141,6 +7297,7 @@ contains
     !   call this%cells(i)%get_nonlinear_weights_alt(this%p,grid%gblock(1)%grid_vars%quad(idx(1),idx(2),idx(3)))
     ! end if
     if (use_cweno .and. any(T1>0.0015_dp*2.0_dp**(this%n_dim - 1)) ) then
+    ! if (use_cweno) then
       if ( column_scaling ) then
         do s = 1,this%cells(i)%sec_idx(1)
           call this%get_cell_RHS_sec(i,s,n_var,var_idx,n_nbors,RHS)
@@ -7160,7 +7317,9 @@ contains
           end do 
         end do
       end if
-      call this%cells(i)%cweno(this%p)
+      ! call this%cells(i)%cweno(this%p)
+      call this%cells(i)%cweno(this%p,mu=this%cells(i)%get_mu(RHS))
+
     end if
 
     deallocate( RHS )
